@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#ffe0ef">
+  <title>Yakimma — The world you can show off</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#" id="homeBtn"><span class="logo">🐾</span> Yakimma</a>
+    <div class="top-actions"><span class="wallet" id="wallet">🐱 0 MC · 💌 0 LC</span><button class="soft" id="accountBtn">Sign in</button></div>
+  </header>
+  <div class="layout">
+    <nav class="sidebar" aria-label="Main navigation">
+      <button class="nav active" data-page="feed">🏡 Feed</button>
+      <button class="nav" data-page="profile">🌷 Profile</button>
+      <button class="nav" data-page="settings">⚙️ Settings</button>
+      <button class="nav" data-page="friends">👯 Friends</button>
+      <button class="nav" data-page="nails">💅 Nails</button>
+      <button class="nav" data-page="shop">🛍️ Shop</button>
+    </nav>
+    <main id="main" aria-live="polite"></main>
+  </div>
+  <div id="modalroot"></div>
+  <footer>Yakimma • The world you can show off • Early access starter</footer>
+  <script src="/app.js" defer></script>
+</body>
+</html>

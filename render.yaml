@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: yakimma
+    runtime: node
+    plan: starter # persistent disks need a paid instance
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/me
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "24"
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: DATA_DIR
+        value: /var/data/db
+      - key: UPLOAD_DIR
+        value: /var/data/uploads
+    disk:
+      name: yakimma-data
+      mountPath: /var/data
+      sizeGB: 5
