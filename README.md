@@ -22,7 +22,7 @@ This is a runnable first backend/frontend starter—not a published website yet.
 
 ## Before you run it
 
-Install Node.js 20 or newer. Then, in this folder:
+Install Node.js 20 or newer. The live server runs Node 20.20.2, and `.nvmrc` pins that version so `nvm use` matches it. Then, in this folder:
 
 ```bash
 npm install
