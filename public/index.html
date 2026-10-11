@@ -1,10 +1,12 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="pink">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#ffe0ef">
   <title>Yakimma — The world you can show off</title>
+  <!-- Put the last-used theme on before the page draws, so it doesn't flash pink first. -->
+  <script>try { document.documentElement.dataset.theme = localStorage.getItem("yakimma.theme") || "pink"; } catch (e) {}</script>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -18,8 +20,10 @@
       <button class="nav" data-page="profile">🌷 Profile</button>
       <button class="nav" data-page="settings">⚙️ Settings</button>
       <button class="nav" data-page="friends">👯 Friends</button>
+      <button class="nav" data-page="groups">🏘️ Groups</button>
       <button class="nav" data-page="nails">💅 Nails</button>
       <button class="nav" data-page="shop">🛍️ Shop</button>
+      <button class="nav" data-page="codes">👩‍💻 Codes</button>
     </nav>
     <main id="main" aria-live="polite"></main>
   </div>

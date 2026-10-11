@@ -3,7 +3,7 @@
 **Tagline:** The world you can show off  
 **Style:** Pink + teal
 
-This is a runnable first backend/frontend starter—not a published website yet. It supports real local sign-up/login, password hashing, database-backed posts and balances, video/photo uploads, likes, the MC-to-LC exchange, shop purchases, real friends, and a Nail Salon.
+This is a runnable first backend/frontend starter—not a published website yet. It supports real local sign-up/login, password hashing, database-backed posts and balances, video/photo uploads, likes, the MC-to-LC exchange, shop purchases, themes, real friends, groups, secret codes, and a Nail Salon.
 
 ## What works in this starter
 
@@ -13,12 +13,18 @@ This is a runnable first backend/frontend starter—not a published website yet.
 - Upload an existing image or video (the site does not record videos).
 - Every *new unique user's first like on a post* rewards the post owner 10 MC. Removing and re-adding the same like does not farm another reward.
 - Exchange 1,000 MC for 1 LC.
-- Shop prices: Nails 10 MC, Speed 40 MC, Effects 70 MC, Goth Theme 1 LC, Pastel Theme 2 LC.
+- Shop prices: Nails 1 LC, Speed 40 MC, Effects 70 MC, Goth Theme 10 MC, Pastel Theme 20 MC.
 - Buy items; purchases and balances are stored in the database.
+- **Themes:** pick a theme in Settings. Pink & Teal, Rose Pink and Mint Teal are free. Goth (mostly black) and Pastel (rainbow pastels) unlock in the Shop and switch on as soon as you buy them. A signed-in person's theme is saved to their account.
+- **Groups:** browse groups people have made, search them, join and leave. Anyone signed in can start up to 5 groups, and only the person who made a group can delete it (its posts and chat are deleted with it). Open a group you're in to chat with the other members or share posts (text, photo or video) that only members can see and like.
+- **Codes:** enter secret codes to win MC, LC, a ginger cat nail sticker, or a key to the secret group Cuties. Each account can use each code once, and too many wrong guesses means a 15-minute wait. The codes and their prizes are in the `codes` list near the top of `server.js`.
 - **Profile pictures:** pick an emoji avatar and background colour, or upload a photo and drag/zoom it to fit the circle. Photos are resized to 400×400 in the browser (which also strips hidden data such as location) and checked on the server to be real images.
-- **Friends:** send, accept, decline and cancel friend requests between real accounts, and remove friends.
-- **Nail Salon:** locked until you buy Nails (10 MC). Pick your hand's skin tone, then choose a friend and give them a manicure: shape, length, polish colour, finish (glossy, matte, shimmer, chrome) and nail art per nail. Finished sets are saved and show on the friend's profile.
-- Responsive pink-and-teal layout and the four requested sidebar sections.
+- **Friends:** send, accept, decline and cancel friend requests between real accounts, and remove friends. Friends can chat privately; unread messages show as a number on the Friends button.
+- **Chats** check for new messages every 3 seconds while open. Messages can be up to 500 characters, and sending more than 30 a minute means a short wait.
+- **Message actions:** tap a message to react with any of 1,898 emojis (Unicode Emoji 15.1, from `public/emoji-data.json`), forward it to a friend or group, or edit or delete your own. Deleted messages show as "This message was deleted". The person who made a group can delete anyone's messages in it. Emojis use the device's own emoji font, so they're Apple emojis on iPhone, iPad and Mac.
+- **Blocking:** block someone from a chat message, a post, a friend request or your friends list. You won't see their messages or posts, they can't send you friend requests, and any friendship ends. Unblock them in the Blocked list on the Friends page.
+- **Nail Salon:** locked until you buy Nails (1 LC). Pick your hand's skin tone, then choose a friend and give them a manicure: shape, length, polish colour, finish (glossy, matte, shimmer, chrome) and nail art per nail. Finished sets are saved and show on the friend's profile.
+- Responsive layout with the sidebar sections, and Mahdiya Faiza Manha's name at the top of the home page.
 
 ## Before you run it
 
@@ -31,7 +37,9 @@ npm start
 
 Open http://localhost:3000
 
-New accounts start with 0 MC. To test the Nail Salon locally, make a second account (for example in a private window), like a post from the first account to earn 10 MC, then unlock Nails in the Shop.
+New accounts start with 0 MC. To test the Nail Salon locally, enter a code that gives LoveCards on the Codes page, then unlock Nails in the Shop. You'll also need a friend: make a second account (for example in a private window) and send a friend request.
+
+The codes live in `server.js`, so anyone who can read the source code can see them. Keep the GitLab repository private.
 
 ## Deploying to Render
 
