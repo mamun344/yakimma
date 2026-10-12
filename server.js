@@ -158,6 +158,7 @@ for (const [name, definition] of [
 // Posts made inside a group have its key (see findGroup) and only show in that group, never on the main feed.
 if (!db.prepare("PRAGMA table_info(posts)").all().some(c => c.name === "group_key")) db.exec("ALTER TABLE posts ADD COLUMN group_key TEXT");
 db.exec("CREATE INDEX IF NOT EXISTS posts_group ON posts(group_key, id)");
+db.exec("CREATE INDEX IF NOT EXISTS posts_user ON posts(user_id, id)");
 // Chats used to be kept in two tables. Move any old messages into `messages` once, then remove the old tables.
 const oldChatTables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('group_messages','direct_messages')").all().map(t => t.name);
 if (oldChatTables.length) db.transaction(() => {
@@ -194,12 +195,15 @@ const codes = {
   M30W57: { item: "gingercat-sticker" }
 };
 // Secret groups are part of Yakimma itself: nobody owns them, and the only way in is their code.
+// `intro` is shown above the usual message in the group's chat and posts while they're still empty.
 const secretGroups = [
-  { id: "cuties", name: "Cuties", icon: "🎀", description: "A secret group for cuties who found the code. 💖" }
+  { id: "cuties", name: "Cuties", icon: "💖", description: "A secret group for cuties who found the code. 💖", intro: "A special group for special people chosen by the Owner!" }
 ];
 // Every emoji people can react with. The same file feeds the emoji picker in the browser.
 const emojiSet = new Set(JSON.parse(fs.readFileSync(path.join(__dirname, "public", "emoji-data.json"), "utf8")).flatMap(g => g.emojis.map(e => e[0])));
-const groupIcons = ["🏘️", "🌸", "🎨", "🎮", "📚", "🎵", "⚽", "🐱", "🐶", "🦄", "💅", "🍰", "🌈", "⭐", "🎀", "🧸"];
+// Icons people can pick for their own groups. A secret group's icon is only ever its own, so it's never offered here.
+const groupIcons = ["🏘️", "🌸", "🎨", "🎮", "📚", "🎵", "⚽", "🐱", "🐶", "🦄", "💅", "🍰", "🌈", "⭐", "🎀", "🧸"]
+  .filter(icon => !secretGroups.some(g => g.icon === icon));
 const MAX_GROUPS_PER_PERSON = 5;
 
 const nailOptions = {
@@ -344,8 +348,12 @@ function requireAuth(req, res, next) {
 function avatarOf(row) {
   return { emoji: row.avatar_emoji, bg: row.avatar_bg, photoUrl: row.avatar_path ? `/uploads/${encodeURIComponent(row.avatar_path)}` : null };
 }
+// Every account has its own 13-digit number, in sign-up order: the first is 0000000000000, the next 0000000000001,
+// and so on up to 9999999999999. Account ids start at 1 and are never reused, so the number is the id minus one.
+const MAX_ACCOUNTS = 10 ** 13;
+const accountNumber = id => String(id - 1).padStart(13, "0");
 function publicUser(row) {
-  return row ? { id: row.id, username: row.username, mc: row.mc, lc: row.lc, handTone: row.hand_tone, avatar: avatarOf(row), theme: row.theme } : null;
+  return row ? { id: row.id, accountNumber: accountNumber(row.id), username: row.username, mc: row.mc, lc: row.lc, handTone: row.hand_tone, avatar: avatarOf(row), theme: row.theme } : null;
 }
 function ownsItem(userId, itemId) {
   return Boolean(db.prepare("SELECT 1 FROM inventory WHERE user_id=? AND item_id=?").get(userId, itemId));
@@ -405,7 +413,7 @@ function groupsPayload(viewerId, onlyId) {
 }
 function secretGroupCard(viewerId, g) {
   return {
-    id: g.id, name: g.name, description: g.description, icon: g.icon, ownerId: null, owner: null, secret: true,
+    id: g.id, name: g.name, description: g.description, icon: g.icon, intro: g.intro || null, ownerId: null, owner: null, secret: true,
     unlocked: Boolean(viewerId && secretGroupUnlocked(viewerId, g.id)),
     members: db.prepare("SELECT COUNT(*) AS n FROM secret_group_members WHERE group_id=?").get(g.id).n,
     joined: Boolean(db.prepare("SELECT 1 FROM secret_group_members WHERE group_id=? AND user_id=?").get(g.id, viewerId || 0)),
@@ -499,20 +507,25 @@ function chatMessages(viewerId, chat, since = 0) {
 const insertMessage = (chat, senderId, body, forwarded = 0) => db.prepare("INSERT INTO messages(group_key,sender_id,recipient_id,body,forwarded,rev) VALUES(?,?,?,?,?,?)")
   .run(chat.groupKey ?? null, senderId, chat.friendId ?? null, body, forwarded, nextRev());
 const markRead = (me, chat) => { if (chat.friendId) db.prepare("UPDATE messages SET read_at=CURRENT_TIMESTAMP WHERE sender_id=? AND recipient_id=? AND read_at IS NULL").run(chat.friendId, me); };
-function postRows(viewerId, groupKey = null) {
+// Posts as the browser shows them; `where` picks which ones, in id order ("DESC" is newest first).
+function selectPosts(viewerId, where, params, order = "DESC", limit = 100) {
   return db.prepare(`
     SELECT p.id, p.user_id AS userId, u.username, p.caption, p.media_path AS mediaPath,
       p.media_type AS mediaType, p.created_at AS createdAt, u.avatar_emoji, u.avatar_bg, u.avatar_path,
       (SELECT COUNT(*) FROM likes l WHERE l.post_id=p.id) AS likes,
       EXISTS(SELECT 1 FROM likes l WHERE l.post_id=p.id AND l.user_id=?) AS liked
     FROM posts p JOIN users u ON u.id=p.user_id
-    WHERE p.group_key IS ? AND NOT EXISTS(SELECT 1 FROM blocks b WHERE b.blocker_id=? AND b.blocked_id=p.user_id)
-    ORDER BY p.id DESC LIMIT 100
-  `).all(viewerId || 0, groupKey, viewerId || 0).map(p => ({
+    WHERE ${where}
+    ORDER BY p.id ${order} LIMIT ?
+  `).all(viewerId || 0, ...params, limit).map(p => ({
     id: p.id, userId: p.userId, username: p.username, avatar: avatarOf(p), caption: p.caption,
     mediaUrl: p.mediaPath ? `/uploads/${encodeURIComponent(p.mediaPath)}` : null,
     mediaType: p.mediaType, createdAt: p.createdAt, likes: p.likes, liked: Boolean(p.liked)
   }));
+}
+// The newest 100 posts on the main feed (or in a group), hiding people the viewer blocked.
+function postRows(viewerId, groupKey = null) {
+  return selectPosts(viewerId, "p.group_key IS ? AND NOT EXISTS(SELECT 1 FROM blocks b WHERE b.blocker_id=? AND b.blocked_id=p.user_id)", [groupKey, viewerId || 0]);
 }
 function apiError(err, _req, res, _next) {
   if (err instanceof multer.MulterError) {
@@ -532,9 +545,17 @@ app.post("/api/signup", authLimiter, async (req, res, next) => {
   try {
     const username = String(req.body.username || "").trim();
     const password = String(req.body.password || "");
-    if (!/^[A-Za-z0-9_]{3,20}$/.test(username)) return res.status(400).json({ error: "Username must be 3–20 letters, numbers, or underscores." });
-    if (password.length < 10 || password.length > 200) return res.status(400).json({ error: "Password must be 10–200 characters." });
+    if (/\s/.test(username)) return res.status(400).json({ error: "Do not use spaces. Usernames can only have letters and numbers." });
+    if (/[^A-Za-z0-9]/.test(username)) return res.status(400).json({ error: "Do not use symbols. Usernames can only have letters and numbers." });
+    if (username.length < 3 || username.length > 20) return res.status(400).json({ error: "Username must be 3–20 letters or numbers." });
+    // Passwords can have any letters, numbers, symbols or emojis, but no spaces.
+    if (/\s/.test(password)) return res.status(400).json({ error: "Do not use spaces in your password." });
+    if (password.length < 8 || password.length > 200) return res.status(400).json({ error: "Password must be 8–200 characters." });
     const hash = await bcrypt.hash(password, 12);
+    if ((db.prepare("SELECT seq FROM sqlite_sequence WHERE name='users'").get()?.seq || 0) >= MAX_ACCOUNTS) {
+      return res.status(403).json({ error: "Yakimma is full: every account number has been given out." });
+    }
+    // Usernames are compared ignoring capitals (the column is COLLATE NOCASE), so "Cutie" and "cutie" are the same name.
     const result = db.prepare("INSERT INTO users(username,password_hash,mc) VALUES(?,?,0)").run(username, hash);
     req.session.regenerate(err => {
       if (err) return next(err);
@@ -542,7 +563,7 @@ app.post("/api/signup", authLimiter, async (req, res, next) => {
       res.json({ user: publicUser(currentUser(req)), products });
     });
   } catch (err) {
-    if (String(err.code) === "SQLITE_CONSTRAINT_UNIQUE") return res.status(409).json({ error: "That username is already taken." });
+    if (String(err.code) === "SQLITE_CONSTRAINT_UNIQUE") return res.status(409).json({ error: "Do not copy usernames. Someone already has that username, and changing capital letters still counts as the same name." });
     next(err);
   }
 });
@@ -570,6 +591,18 @@ app.post("/api/logout", (req, res, next) => {
 });
 
 app.get("/api/posts", (req, res) => res.json({ posts: postRows(currentUser(req)?.id) }));
+
+// Your own feed posts for your profile, newest or oldest first, a page at a time. `after` is the last post id already shown.
+const MY_POSTS_PAGE = 12;
+app.get("/api/me/posts", requireAuth, (req, res) => {
+  const me = req.session.userId, oldest = req.query.order === "oldest", after = Number(req.query.after);
+  const from = Number.isSafeInteger(after) && after > 0 ? ` AND p.id ${oldest ? ">" : "<"} ?` : "";
+  const posts = selectPosts(me, `p.user_id=? AND p.group_key IS NULL${from}`, from ? [me, after] : [me], oldest ? "ASC" : "DESC", MY_POSTS_PAGE + 1);
+  res.json({
+    posts: posts.slice(0, MY_POSTS_PAGE), more: posts.length > MY_POSTS_PAGE,
+    total: db.prepare("SELECT COUNT(*) AS n FROM posts WHERE user_id=? AND group_key IS NULL").get(me).n
+  });
+});
 
 // Makes a post on the main feed, or inside a group when groupKey is given.
 function createPost(req, res, next, groupKey) {
@@ -686,16 +719,17 @@ app.post("/api/groups", requireAuth, groupLimiter, (req, res, next) => {
   if (db.prepare("SELECT COUNT(*) AS n FROM community_groups WHERE owner_id=?").get(me).n >= MAX_GROUPS_PER_PERSON) {
     return res.status(400).json({ error: `You can make up to ${MAX_GROUPS_PER_PERSON} groups.` });
   }
+  let groupId;
   try {
     db.transaction(() => {
-      const group = db.prepare("INSERT INTO community_groups(name,description,icon,owner_id) VALUES(?,?,?,?)").run(name, description, icon, me);
-      db.prepare("INSERT INTO group_members(group_id,user_id) VALUES(?,?)").run(group.lastInsertRowid, me);
+      groupId = Number(db.prepare("INSERT INTO community_groups(name,description,icon,owner_id) VALUES(?,?,?,?)").run(name, description, icon, me).lastInsertRowid);
+      db.prepare("INSERT INTO group_members(group_id,user_id) VALUES(?,?)").run(groupId, me);
     })();
   } catch (err) {
     if (String(err.code) === "SQLITE_CONSTRAINT_UNIQUE") return res.status(409).json({ error: "There's already a group with that name." });
     return next(err);
   }
-  res.status(201).json(groupsPayload(me));
+  res.status(201).json({ ...groupsPayload(me), groupId });
 });
 
 app.post("/api/groups/:id/join", requireAuth, (req, res) => {
@@ -747,6 +781,18 @@ app.get("/api/groups/:id", (req, res) => {
   const me = currentUser(req)?.id, card = groupCard(me, group);
   if (!me || !isGroupMember(me, group)) return res.json({ group: card, posts: [], chat: { messages: [], rev: 0 } });
   res.json({ group: card, posts: postRows(me, group.key), chat: chatMessages(me, groupChatFor(group, me)) });
+});
+
+// Everyone in a group, for the list you get by tapping the faces on it. The person who made it comes first.
+app.get("/api/groups/:id/members", requireAuth, (req, res) => {
+  const group = findGroup(req.params.id);
+  if (!group) return res.status(404).json({ error: "That group doesn't exist any more." });
+  // Secret groups have no owner.
+  const info = group.secret || db.prepare("SELECT name, icon, owner_id AS ownerId FROM community_groups WHERE id=?").get(group.id), ownerId = info.ownerId || 0;
+  const [table, key] = group.secret ? ["secret_group_members", group.key] : ["group_members", group.id];
+  const members = db.prepare(`SELECT u.id, u.username, u.avatar_emoji, u.avatar_bg, u.avatar_path FROM ${table} m JOIN users u ON u.id=m.user_id
+    WHERE m.group_id=? ORDER BY u.id=? DESC, u.username COLLATE NOCASE`).all(key, ownerId);
+  res.json({ name: info.name, icon: info.icon, members: members.map(m => ({ id: m.id, username: m.username, avatar: avatarOf(m), owner: m.id === ownerId })) });
 });
 
 app.post("/api/groups/:id/posts", requireAuth, (req, res, next) => {

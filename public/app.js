@@ -7,6 +7,8 @@
     social: { friends: [], incoming: [], outgoing: [] }, received: [], salon: null,
     themes: [], guestTheme: null, groups: null, groupIcons: [], groupDraft: null,
     codes: { redeemed: [], total: 0 }, codeWin: null,
+    // myPosts: your own posts on the profile ({ order: "newest"|"oldest", posts, more, total }).
+    myPosts: null,
     // groupView: the group page that's open. chat: the open group or friend chat ({ url, messages, draft, names, friendId? }).
     groupView: null, chat: null
   };
@@ -79,8 +81,15 @@
   const setGroups = d => { state.groups = d.groups; state.groupIcons = d.icons; };
   async function loadGroups() { setGroups(await api("/api/groups")); }
   async function loadCodes() { state.codes = state.user ? await api("/api/codes") : { redeemed: [], total: 0 }; }
+  // Pass more=true to add the next page after the posts already shown.
+  async function loadMyPosts(more = false) {
+    const m = state.myPosts, order = m?.order || "newest", after = more ? m.posts.at(-1)?.id : 0;
+    const d = await api(`/api/me/posts?order=${order}${after ? `&after=${after}` : ""}`);
+    state.myPosts = { order, total: d.total, more: d.more, posts: more ? [...m.posts, ...d.posts] : d.posts };
+  }
   async function loadPageData() {
     if (state.user && ["friends", "nails", "profile"].includes(state.page)) await loadSocial();
+    if (state.user && state.page === "profile") await loadMyPosts();
     if (state.page === "groups") await loadGroups();
     if (state.page === "codes") await loadCodes();
   }
@@ -214,8 +223,11 @@
     return `<div class="msg-tools" role="toolbar" aria-label="Message actions"><div class="quick">${QUICK_REACTIONS.map(e => `<button class="emoji-btn" data-react="${e}" data-msg="${m.id}" aria-label="React with ${e}">${e}</button>`).join("")}<button class="emoji-btn more" data-react-more="${m.id}" aria-label="All emojis" title="All emojis">＋</button></div>` +
       `<div class="tool-row"><button class="soft" data-forward-msg="${m.id}">↪️ Forward</button>${mine && !m.forwarded ? `<button class="soft" data-edit-msg="${m.id}">✏️ Edit</button>` : ""}${canDelete ? `<button class="soft" data-delete-msg="${m.id}">🗑️ Delete</button>` : ""}${mine ? "" : `<button class="soft" data-block="${m.userId}" data-name="${safe(m.username)}">🚫 Block</button>`}</div></div>`;
   }
-  const emptyChat = `<p class="muted chat-empty">No messages yet. Say hi! 👋</p>`;
-  const logHTML = () => state.chat.messages.length ? state.chat.messages.map(messageHTML).join("") : emptyChat;
+  // A chat can bring its own empty message (group chats do); friend chats use this one.
+  const emptyChat = "No messages yet. Say hi! 👋";
+  const logHTML = () => state.chat.messages.length ? state.chat.messages.map(messageHTML).join("") : `<p class="muted chat-empty">${state.chat.empty || emptyChat}</p>`;
+  // What an empty group chat or post list says. Special groups put their intro on top.
+  const groupEmpty = (g, line) => (g.intro ? `<strong>${safe(g.intro)}</strong><br>` : "") + line;
   function chatBox(placeholder) {
     const c = state.chat, editing = c.editing && c.messages.some(m => m.id === c.editing && !m.deleted);
     return `<div class="chat-log" id="chatLog">${logHTML()}</div>` +
@@ -280,7 +292,7 @@
     const url = `/api/groups/${encodeURIComponent(key)}`, d = await api(url);
     state.page = "groups"; state.notice = "";
     state.groupView = { key, group: d.group, posts: d.posts, tab, caption: "" };
-    state.chat = { url: `${url}/messages`, ...d.chat, draft: "", names: true, moderator: d.group.ownerId === state.user?.id, selected: null, editing: null };
+    state.chat = { url: `${url}/messages`, ...d.chat, draft: "", names: true, moderator: d.group.ownerId === state.user?.id, selected: null, editing: null, empty: groupEmpty(d.group, "Type something to start the chat!") };
     render(); if (tab === "chat") showChat();
   }
   async function openChat(friendId) {
@@ -341,6 +353,24 @@
         c.selected = null; toast(`Forwarded to ${b.dataset.name}! ↪️`); await pollChat();
       } catch (err) { toast(err.message, true); }
     });
+  }
+  async function openMembers(key) {
+    const d = await api(`/api/groups/${encodeURIComponent(key)}/members`), me = state.user?.id;
+    const tag = m => (m.owner ? ` <span class="pill">👑 Owner</span>` : "") + (m.id === me ? ` <span class="pill">You</span>` : "");
+    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal members-modal" role="dialog" aria-modal="true" aria-labelledby="membersTitle"><div class="row between"><h2 id="membersTitle">${safe(d.icon)} ${safe(d.name)} members (${d.members.length})</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
+      (d.members.length ? `<label class="sr-only" for="memberSearch">Search members</label><input id="memberSearch" type="search" placeholder="🔎 Search members" autocomplete="off">` +
+        `<div class="member-list">${d.members.map(m => `<div class="member" data-search="${safe(m.username.toLowerCase())}">${avatarHTML(m.avatar)}<strong>${safe(m.username)}</strong>${tag(m)}</div>`).join("")}</div><p class="muted" id="noMemberMatch" hidden>No members match that search.</p>`
+        : `<p class="muted">No one has joined yet.</p>`) + `</section></div>`;
+    $("#closeModal").onclick = closeModal;
+    $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
+    if (!d.members.length) return;
+    $("#memberSearch").oninput = e => {
+      const q = e.target.value.trim().toLowerCase(); let shown = 0;
+      document.querySelectorAll(".member").forEach(m => { m.hidden = !m.dataset.search.includes(q); shown += !m.hidden; });
+      $("#noMemberMatch").hidden = shown > 0;
+    };
+    // Typing a search straight away suits a keyboard; on phones it would pop the keyboard up over the list.
+    if (matchMedia("(hover: hover)").matches) $("#memberSearch").focus();
   }
   async function blockPerson(id, name) {
     if (!confirm(`Block ${name}?\n\nYou won't see their messages or posts, they can't send you friend requests, and if you're friends they'll be removed.`)) return;
@@ -438,6 +468,8 @@
   }
 
   // ---- Groups, Codes + Settings pages ----
+  // A group's row of faces and member count. Tapping it lists everyone in the group.
+  const facesButton = g => `<button class="faces-btn" data-members="${safe(g.id)}" aria-label="See all ${g.members} member${g.members === 1 ? "" : "s"} of ${safe(g.name)}"><span class="faces">${g.faces.map(f => avatarHTML(f.avatar, "tiny")).join("")}</span><small>${g.members} member${g.members === 1 ? "" : "s"}</small></button>`;
   function groupCard(g) {
     const mine = state.user?.id === g.ownerId;
     const open = g.joined ? `<button class="primary" data-open-group="${g.id}">💬 Open</button>` : "";
@@ -446,20 +478,20 @@
       : g.secret && !g.unlocked ? `<button class="soft" data-page="codes">🔒 Needs a code</button>` : `<button class="primary" data-join-group="${g.id}">Join</button>`;
     const tag = (g.secret ? ` <span class="pill">🔑 Secret</span>` : "") + (mine ? ` <span class="pill">Yours</span>` : g.joined ? ` <span class="pill">Joined ✓</span>` : "");
     return `<article class="group-card" data-search="${safe(`${g.name} ${g.description}`.toLowerCase())}"><div class="group-icon" aria-hidden="true">${safe(g.icon)}</div>` +
-      `<div class="group-body"><h3>${safe(g.name)}${tag}</h3>${g.description ? `<p>${safe(g.description)}</p>` : ""}<div class="row"><span class="faces">${g.faces.map(f => avatarHTML(f.avatar, "tiny")).join("")}</span><small>${g.members} member${g.members === 1 ? "" : "s"} · ${g.secret ? "secret group" : `made by ${safe(g.owner)}`}</small></div></div>` +
+      `<div class="group-body"><h3>${safe(g.name)}${tag}</h3>${g.description ? `<p>${safe(g.description)}</p>` : ""}<div class="row">${facesButton(g)}<small>${g.secret ? "secret group" : `made by ${safe(g.owner)}`}</small></div></div>` +
       `<div class="group-actions">${action}</div></article>`;
   }
   function groupPage() {
     const v = state.groupView, g = v.group;
     const top = hero(`${safe(g.icon)} ${safe(g.name)}`, g.description ? safe(g.description) : `A group made by ${safe(g.owner)}.`, g.secret ? "SECRET GROUP" : "GROUP");
-    const head = `<section class="panel"><div class="row between"><button class="soft" data-page="groups">← All groups</button><div class="row"><span class="faces">${g.faces.map(f => avatarHTML(f.avatar, "tiny")).join("")}</span><small>${g.members} member${g.members === 1 ? "" : "s"}</small></div></div>`;
+    const head = `<section class="panel"><div class="row between"><button class="soft" data-page="groups">← All groups</button>${facesButton(g)}</div>`;
     if (!g.joined) return top + head + `<p>Join this group to see its posts and chat.</p></section>`;
     const tabs = [["chat", "💬 Chat"], ["posts", "📸 Posts"]].map(([id, label]) => `<button class="step ${v.tab === id ? "on" : ""}" data-group-tab="${id}" role="tab" aria-selected="${v.tab === id}">${label}</button>`).join("");
     const body = v.tab === "chat" ? `<section class="panel">${chatBox(`Message ${g.name}`)}</section>` :
       `<section class="panel"><form id="groupPostForm"><label for="gpCaption">Post to ${safe(g.name)}</label><textarea id="gpCaption" maxlength="240" rows="2" required placeholder="Share something with the group…">${safe(v.caption)}</textarea>` +
       `<label for="gpMedia">Add a photo or video (optional)</label><input id="gpMedia" type="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,video/quicktime">` +
       `<div class="actions"><button class="primary" type="submit">Post to group ✨</button></div></form></section>` +
-      `<div class="feed">${v.posts.map(postCard).join("") || `<div class="panel empty">No posts in this group yet. Share the first one! 🌸</div>`}</div>`;
+      `<div class="feed">${v.posts.map(postCard).join("") || `<div class="panel empty">${groupEmpty(g, "Post something to make the people laugh!")}</div>`}</div>`;
     return top + head + `<div class="tabs" role="tablist">${tabs}</div></section>` + body;
   }
   function groupsPage() {
@@ -516,6 +548,14 @@
     return `<button class="primary" data-buy="${p.id}">Buy</button>`;
   }
 
+  function myPostsSection() {
+    const m = state.myPosts;
+    if (!m) return `<section class="panel"><h3>My posts</h3><p class="muted">Loading your posts…</p></section>`;
+    const order = [["newest", "🆕 Newest first"], ["oldest", "🕰️ Oldest first"]].map(([id, label]) => `<button class="step ${m.order === id ? "on" : ""}" data-my-order="${id}" aria-pressed="${m.order === id}">${label}</button>`).join("");
+    return `<section class="panel"><h3>My posts (${m.total})</h3>${m.total > 1 ? `<div class="tabs" role="group" aria-label="Order of your posts">${order}</div>` : ""}</section>` +
+      `<div class="feed">${m.posts.map(postCard).join("") || `<div class="panel empty">You haven't posted yet. Your posts will show up here! 🌸</div>`}` +
+      (m.more ? `<button class="soft" id="moreMyPosts">${m.order === "newest" ? "Show older posts ⬇️" : "Show newer posts ⬇️"}</button>` : "") + `</div>`;
+  }
   function postCard(p) {
     return `<article class="panel post" data-post="${p.id}"><div class="posthead">${avatarHTML(p.avatar)}<div><strong>${safe(p.username)}</strong><br><small>${timeLabel(p.createdAt)}</small></div>${state.user && state.user.id !== p.userId ? `<button class="soft post-block" data-block="${p.userId}" data-name="${safe(p.username)}">🚫 Block</button>` : ""}</div>${p.mediaUrl ? (p.mediaType?.startsWith("video/") ? `<video class="media" src="${p.mediaUrl}" controls playsinline preload="metadata"></video>` : `<img class="media" src="${p.mediaUrl}" alt="Post uploaded by ${safe(p.username)}">`) : `<div class="notice">📝 Text post</div>`}<p>${safe(p.caption)}</p><div class="actions"><button class="soft" data-like="${p.id}" ${!state.user || state.user.id===p.userId?"disabled":""}>${p.liked?"💗 Liked":"🤍 Like"} · ${p.likes}</button>${p.mediaType?.startsWith("video/")?`<button class="soft" data-speed="${p.id}">⏩ Speed</button><button class="soft" data-effects="${p.id}">✨ Effects</button>`:""}</div><div id="viewer-${p.id}"></div></article>`;
   }
@@ -526,7 +566,7 @@
     friendsBadge();
     let html = "";
     if (state.page === "feed") {
-      html = `<p class="home-name">Mahdiya Faiza Manha</p>` +
+      html = `<p class="home-name">Mahdiya Faiza Manha</p><p class="home-email">Email me: <a href="mailto:manharuwycse@gmail.com">manharuwycse@gmail.com</a></p>` +
       hero("The world you can show off", "Upload videos you already made, watch posts, and earn 10 MC when someone likes your post.", "WELCOME TO YAKIMMA") +
       `<section class="panel"><div class="row between"><div><h2>Welcome to your feed 🌸</h2><small>Be kind, be creative, and show off your style.</small></div><button class="primary" data-page="create">＋ Upload post</button></div></section>` +
       `<div class="feed">${state.posts.map(postCard).join("") || `<div class="panel empty">No posts yet. Sign in and share the first one! 🌸</div>`}</div>`;
@@ -546,8 +586,8 @@
       html = nailsPage();
     } else if (state.page === "profile") {
       html = hero("Your Yakimma profile", "Your posts, wallet, and collection.", "MY PROFILE") +
-      `<section class="panel"><div class="posthead">${state.user?`<button class="avatar-edit" id="editAvatar" aria-label="Change profile picture">${avatarHTML(state.user.avatar,"big")}<span class="avatar-edit-badge" aria-hidden="true">✏️</span></button>`:avatarHTML(null,"big")}<div><h2 style="margin:0">${state.user?safe(state.user.username):"Guest"}</h2><small>${state.user?"Signed in":"Browsing as a guest"}</small></div></div>${state.user?`<div class="row"><span class="pill">🐱 ${state.user.mc} MC</span><span class="pill">💌 ${state.user.lc} LC</span><span class="pill">🎁 ${state.inventory.length} items</span><span class="pill">👯 ${state.social.friends.length} friend${state.social.friends.length===1?"":"s"}</span></div><div class="actions"><button class="soft" id="editAvatarBtn">🎨 Change picture</button><button class="danger" id="logout">Sign out</button></div>`:`<button class="primary" id="openAuth">Create account / Sign in</button>`}</section><section class="panel"><h3>My collection</h3>${state.inventory.length?[...state.products.filter(p=>state.inventory.includes(p.id)).map(p=>`${p.icon} ${safe(p.name)}`),...state.nailOptions.arts.filter(a=>a.item&&state.inventory.includes(a.item)).map(a=>`${a.icon} ${safe(a.name)} sticker`)].map(x=>`<span class="pill">${x}</span> `).join(""):`<p class="muted">Visit the shop to collect something cute.</p>`}</section>` +
-      (state.user ? `<section class="panel"><h3>My nails 💅</h3>${receivedGallery(3)}</section>` : "");
+      `<section class="panel"><div class="posthead">${state.user?`<button class="avatar-edit" id="editAvatar" aria-label="Change profile picture">${avatarHTML(state.user.avatar,"big")}<span class="avatar-edit-badge" aria-hidden="true">✏️</span></button>`:avatarHTML(null,"big")}<div><h2 style="margin:0">${state.user?safe(state.user.username):"Guest"}</h2><small>${state.user?`🔢 Account number ${state.user.accountNumber}`:"Browsing as a guest"}</small></div></div>${state.user?`<div class="row"><span class="pill">🐱 ${state.user.mc} MC</span><span class="pill">💌 ${state.user.lc} LC</span><span class="pill">🎁 ${state.inventory.length} items</span><span class="pill">👯 ${state.social.friends.length} friend${state.social.friends.length===1?"":"s"}</span></div><div class="actions"><button class="soft" id="editAvatarBtn">🎨 Change picture</button><button class="danger" id="logout">Sign out</button></div>`:`<button class="primary" id="openAuth">Create account / Sign in</button>`}</section><section class="panel"><h3>My collection</h3>${state.inventory.length?[...state.products.filter(p=>state.inventory.includes(p.id)).map(p=>`${p.icon} ${safe(p.name)}`),...state.nailOptions.arts.filter(a=>a.item&&state.inventory.includes(a.item)).map(a=>`${a.icon} ${safe(a.name)} sticker`)].map(x=>`<span class="pill">${x}</span> `).join(""):`<p class="muted">Visit the shop to collect something cute.</p>`}</section>` +
+      (state.user ? `<section class="panel"><h3>My nails 💅</h3>${receivedGallery(3)}</section>` + myPostsSection() : "");
     } else if (state.page === "settings") {
       html = settingsPage();
     }
@@ -561,17 +601,23 @@
   const closeModal = () => { $("#modalroot").innerHTML = ""; };
   function openAuth(startMode = "login") {
     $("#accountMenu")?.remove();
-    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="authTitle"><div class="row between"><h2 id="authTitle">🌸 Welcome to Yakimma</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div><p class="muted-note">Create a real local test account. Use a unique password you don't use anywhere else. This local starter is not yet a public website.</p><div class="row"><button type="button" id="tabLogin">Sign in</button><button type="button" id="tabSignup">Create account</button></div><form id="authForm"><label for="username">Username</label><input id="username" name="username" minlength="3" maxlength="20" pattern="[A-Za-z0-9_]+" autocomplete="username" required><label for="password" id="passwordLabel">Password</label><div class="password-wrap"><input id="password" name="password" type="password" maxlength="200" required><button type="button" class="eye" id="togglePassword" aria-label="Show password" aria-pressed="false" title="Show password">${EYE_OPEN}</button></div><p id="authError" class="muted-note"></p><button class="primary" type="submit" style="width:100%">Sign in</button></form></section></div>`;
+    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="authTitle"><div class="row between"><h2 id="authTitle">🌸 Welcome to Yakimma</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div><p class="muted-note">Create a real local test account. Use a unique password you don't use anywhere else. This local starter is not yet a public website.</p><div class="row"><button type="button" id="tabLogin">Sign in</button><button type="button" id="tabSignup">Create account</button></div><form id="authForm"><label for="username">Username</label><input id="username" name="username" minlength="3" maxlength="20" autocomplete="username" required aria-describedby="usernameRules"><div class="notice error rules" id="usernameRules" role="note">⚠️ Do not copy usernames<br>⚠️ Do not use symbols<br>⚠️ Do not use spaces</div><label for="password" id="passwordLabel">Password</label><div class="password-wrap"><input id="password" name="password" type="password" maxlength="200" required aria-describedby="passwordRules"><button type="button" class="eye" id="togglePassword" aria-label="Show password" aria-pressed="false" title="Show password">${EYE_OPEN}</button></div><div class="notice error rules" id="passwordRules" role="note">⚠️ Do not use spaces</div><p id="authError" class="muted-note"></p><button class="primary" type="submit" style="width:100%">Sign in</button></form></section></div>`;
     let mode = startMode;
     const setMode = m => {
       mode = m;
       const signup = m === "signup";
       $("#authTitle").textContent = signup ? "🌸 Join Yakimma" : "🩵 Welcome back";
       $("#authForm button[type=submit]").textContent = signup ? "Create account" : "Sign in";
-      $("#passwordLabel").textContent = signup ? "Password (10+ characters)" : "Password";
+      $("#passwordLabel").textContent = signup ? "Password (8+ characters)" : "Password";
       $("#password").autocomplete = signup ? "new-password" : "current-password";
-      $("#password").minLength = signup ? 10 : 1;
-      $("#authError").textContent = signup ? "Username: 3–20 letters, numbers, or underscores." : "Enter your username and password.";
+      $("#password").minLength = signup ? 8 : 1;
+      // The rules only apply to new accounts, so older accounts with other characters or spaces can still sign in.
+      $("#usernameRules").hidden = $("#passwordRules").hidden = !signup;
+      if (signup) {
+        Object.assign($("#username"), { pattern: "[A-Za-z0-9]+", title: "Letters and numbers only. Do not use symbols or spaces." });
+        Object.assign($("#password"), { pattern: "\\S+", title: "Do not use spaces in your password." });
+      } else for (const el of [$("#username"), $("#password")]) { el.removeAttribute("pattern"); el.removeAttribute("title"); }
+      $("#authError").textContent = signup ? "Username: 3–20 letters or numbers." : "Enter your username and password.";
       $("#authError").className = "muted-note";
       [["#tabLogin", !signup], ["#tabSignup", signup]].forEach(([sel, on]) => { $(sel).className = on ? "primary" : "soft"; $(sel).setAttribute("aria-pressed", on); });
     };
@@ -591,7 +637,7 @@
       try {
         await api("/api/" + mode, send("POST", { username, password }));
         closeModal(); await refresh(); await loadPageData();
-        toast(mode === "signup" ? `Welcome to Yakimma, ${state.user.username}! 🌸` : `Welcome back, ${state.user.username}! 🩵`);
+        toast(mode === "signup" ? `Welcome to Yakimma, ${state.user.username}! 🌸 Your account number is ${state.user.accountNumber}.` : `Welcome back, ${state.user.username}! 🩵`);
       }
       catch (err) { $("#authError").textContent = err.message; $("#authError").className = "notice error"; }
     };
@@ -655,7 +701,8 @@
       ox += (e.clientX - drag.x) * k; oy += (e.clientY - drag.y) * k; drag = { x: e.clientX, y: e.clientY }; drawCrop();
     };
     canvas.onpointerup = canvas.onpointercancel = () => { drag = null; };
-    const saved = async (d, message) => { state.user = d.user; closeModal(); await refresh(); toast(message); };
+    // Reloading the page's data puts the new picture on your posts too.
+    const saved = async (d, message) => { state.user = d.user; closeModal(); await refresh(); await loadPageData(); toast(message); };
     $("#savePhoto").onclick = async () => {
       // Re-drawing at 400×400 keeps uploads small and strips hidden photo data such as location.
       const out = document.createElement("canvas"); out.width = out.height = 400;
@@ -713,13 +760,17 @@
       if(b.id==="openAuth"){openAuth("signup");return;}
       if(b.dataset.signIn!==undefined){openAuth("login");return;}
       if(["editAvatar","editAvatarBtn","menuAvatar"].includes(b.id)){openAvatarEditor();return;}
-      if(b.id==="logout"){await api("/api/logout",{method:"POST"});state.groupView=null;state.chat=null;await refresh();state.page="feed";toast("You're signed out. See you soon! 👋");return;}
+      if(b.dataset.myOrder){state.myPosts={...state.myPosts,order:b.dataset.myOrder};await loadMyPosts();render();return;}
+      if(b.id==="moreMyPosts"){b.disabled=true;await loadMyPosts(true);render();return;}
+      if(b.id==="logout"){await api("/api/logout",{method:"POST"});state.groupView=null;state.chat=null;state.myPosts=null;await refresh();state.page="feed";toast("You're signed out. See you soon! 👋");return;}
       if(b.dataset.like){const d=await api(`/api/posts/${b.dataset.like}/like`,{method:"POST"});if(state.groupView)state.groupView.posts=d.posts;else state.posts=d.posts;state.user=d.user;state.notice=d.rewarded?"You earned 10 MC! 🐱":"";render();return;}
       if(b.id==="exchange"){const d=await api("/api/exchange",{method:"POST"});state.user=d.user;toast("Exchanged 1,000 MC for 1 LoveCard! 💌");return;}
       if(b.dataset.buy){const d=await api(`/api/shop/${b.dataset.buy}/buy`,{method:"POST"});state.user=d.user;state.inventory=d.inventory;const t=state.themes.find(x=>x.item===b.dataset.buy);toast(t?`${t.name} theme is on! ${t.icon} You can switch themes any time in Settings.`:"Purchased! ✨");return;}
       if(b.dataset.useTheme){await useTheme(b.dataset.useTheme);return;}
-      if(b.dataset.joinGroup){setGroups(await api(`/api/groups/${b.dataset.joinGroup}/join`,{method:"POST"}));toast("You joined the group! 🎉 Tap Open to chat and post.");return;}
+      // Joining takes you straight into the group's chat.
+      if(b.dataset.joinGroup){setGroups(await api(`/api/groups/${b.dataset.joinGroup}/join`,{method:"POST"}));await openGroup(b.dataset.joinGroup);toast("You joined the group! 🎉 Say hi in the chat.");return;}
       if(b.dataset.openGroup){await openGroup(b.dataset.openGroup);return;}
+      if(b.dataset.members){if(!state.user){openAuth("login");return;}await openMembers(b.dataset.members);return;}
       if(b.dataset.groupTab&&state.groupView){state.groupView.tab=b.dataset.groupTab;render();if(b.dataset.groupTab==="chat"){showChat();await pollChat();}return;}
       if(b.dataset.chat){await openChat(Number(b.dataset.chat));return;}
       if(state.chat){
@@ -801,7 +852,7 @@
       // Keep what was typed, so an error message doesn't wipe the form.
       const draft={name:$("#groupName").value.trim(),description:$("#groupDesc").value.trim(),icon:e.target.querySelector("input[name=groupIcon]:checked")?.value};
       state.groupDraft=draft;
-      try { setGroups(await api("/api/groups",send("POST",draft)));state.groupDraft=null;toast(`Your group "${draft.name}" is ready! 🏘️`); }
+      try { const d=await api("/api/groups",send("POST",draft));setGroups(d);state.groupDraft=null;await openGroup(String(d.groupId));toast(`Your group "${draft.name}" is ready! 🏘️ Start the chat.`); }
       catch(err){toast(err.message,true);}
       return;
     }
