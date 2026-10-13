@@ -9,6 +9,10 @@
     codes: { redeemed: [], total: 0 }, codeWin: null,
     // myPosts: your own posts on the profile ({ order: "newest"|"oldest", posts, more, total }).
     myPosts: null,
+    // viewing: the speed and effect chosen for each video post, by post id ({ speed, effect, open }).
+    viewing: {},
+    // pictures: what you took with the 📷 camera ({ pictures, max }).
+    pictures: null,
     // groupView: the group page that's open. chat: the open group or friend chat ({ url, messages, draft, names, friendId? }).
     groupView: null, chat: null
   };
@@ -60,7 +64,7 @@
     $("#accountBtn").setAttribute("aria-haspopup", state.user ? "menu" : "dialog");
   }
   function friendsBadge() {
-    const requests = state.social.incoming.length, unread = state.social.friends.reduce((n, f) => n + (f.unread || 0), 0);
+    const requests = state.social.incoming.length, unread = state.social.friends.reduce((n, f) => n + (f.unread || 0), state.social.ai?.unread || 0);
     const label = [requests ? `${requests} friend request${requests === 1 ? "" : "s"}` : "", unread ? `${unread} unread message${unread === 1 ? "" : "s"}` : ""].filter(Boolean).join(", ");
     $('.nav[data-page="friends"]').innerHTML = `👯 Friends${label ? ` <span class="badge" aria-label="${label}">${requests + unread}</span>` : ""}`;
   }
@@ -92,6 +96,7 @@
     if (state.user && state.page === "profile") await loadMyPosts();
     if (state.page === "groups") await loadGroups();
     if (state.page === "codes") await loadCodes();
+    if (state.user && state.page === "pictures") state.pictures = await api("/api/pictures");
   }
 
   // ---- Hand + nail drawing (SVG). Fingers are drawn pointing up; each nail is built in its finger's own coordinates. ----
@@ -212,6 +217,8 @@
   function messageHTML(m) {
     const c = state.chat, mine = m.userId === state.user?.id, picked = c.selected === m.id, face = mine ? "" : avatarHTML(m.avatar, "tiny");
     if (m.deleted) return `<div class="msg ${mine ? "mine" : ""}">${face}<div class="msg-body"><div class="bubble deleted"><span class="b-text">🚫 This message was deleted</span><small>${timeLabel(m.createdAt)}</small></div></div></div>`;
+    // AI's messages can only be read, so they have no actions to tap for.
+    if (c.readOnly) return `<div class="msg">${face}<div class="msg-body"><div class="bubble"><span class="b-text">${safe(m.body)}</span><small>${timeLabel(m.createdAt)}</small></div></div></div>`;
     const name = c.names && !mine ? `<strong>${safe(m.username)}</strong>` : "";
     const reactions = m.reactions.length ? `<div class="reactions">${m.reactions.map(r => `<button class="reaction ${r.mine ? "on" : ""}" data-react="${safe(r.emoji)}" data-msg="${m.id}" title="${safe(r.users.join(", "))}" aria-pressed="${r.mine}"><span class="emoji">${safe(r.emoji)}</span>${r.count}</button>`).join("")}</div>` : "";
     return `<div class="msg ${mine ? "mine" : ""} ${picked ? "picked" : ""}">${face}<div class="msg-body">` +
@@ -230,6 +237,7 @@
   const groupEmpty = (g, line) => (g.intro ? `<strong>${safe(g.intro)}</strong><br>` : "") + line;
   function chatBox(placeholder) {
     const c = state.chat, editing = c.editing && c.messages.some(m => m.id === c.editing && !m.deleted);
+    if (c.readOnly) return `<div class="chat-log" id="chatLog">${logHTML()}</div><p class="muted-note">AI sends you tips here. You can't reply to AI yet.</p>`;
     return `<div class="chat-log" id="chatLog">${logHTML()}</div>` +
       (editing ? `<div class="editing-bar"><span>✏️ Editing your message</span><button type="button" class="soft" id="cancelEdit">Cancel</button></div>` : "") +
       `<form id="chatForm" class="row nowrap chat-form"><button type="button" class="soft emoji-open" id="emojiInsert" aria-label="Add an emoji" title="Add an emoji">😊</button><label class="sr-only" for="chatInput">Message</label><input id="chatInput" maxlength="500" autocomplete="off" placeholder="${safe(placeholder)}" value="${safe(c.draft)}"><button class="primary" type="submit">${editing ? "Save" : "Send"}</button></form>` +
@@ -301,6 +309,13 @@
     state.chat = { url, friendId, ...d, draft: "", names: false, moderator: false, selected: null, editing: null };
     const f = state.social.friends.find(x => x.id === friendId);
     if (f) f.unread = 0;
+    render(); showChat();
+  }
+  async function openAIChat() {
+    const url = "/api/ai/messages", d = await api(url);
+    state.page = "friends"; state.notice = ""; state.groupView = null;
+    state.chat = { url, ai: true, readOnly: true, ...d, names: false, moderator: false, selected: null, editing: null, empty: "No messages from AI yet. 🤖" };
+    if (state.social.ai) state.social.ai.unread = 0;
     render(); showChat();
   }
 
@@ -406,39 +421,52 @@
     if (!state.user) return top + signInPanel("Sign in to add friends.");
     const { friends, incoming, outgoing, blocked = [] } = state.social;
     const block = p => `<button class="soft" data-block="${p.userId ?? p.id}" data-name="${safe(p.username)}">🚫 Block</button>`;
+    const ai = state.social.ai;
+    if (state.chat?.ai && ai) return hero("AI assistant 🤖", "Yakimma's AI sends you tips here, like how to get what you need in the Shop.", "AI ASSISTANT") +
+      `<section class="panel"><div class="row chat-head"><button class="soft" data-page="friends">← Friends</button>${avatarHTML(ai.avatar)}<strong>${safe(ai.username)}</strong></div>${chatBox()}</section>`;
     const chatting = state.chat?.friendId && friends.find(f => f.id === state.chat.friendId);
     if (chatting) return hero(`Chat with ${safe(chatting.username)} 💬`, "Only you and your friend can see this chat.", "FRIEND CHAT") +
       `<section class="panel"><div class="row chat-head"><button class="soft" data-page="friends">← Friends</button>${avatarHTML(chatting.avatar)}<strong>${safe(chatting.username)}</strong></div>${chatBox(`Message ${chatting.username}`)}</section>`;
     return top +
       `<section class="panel"><h2>Add a friend</h2><form id="friendForm" class="row nowrap"><label class="sr-only" for="friendName">Friend's username</label><input id="friendName" maxlength="20" placeholder="Their username" autocomplete="off" required><button class="primary" type="submit">Send request</button></form><p class="muted-note">Your friend needs their own Yakimma account. Ask them for their exact username.</p></section>` +
       (incoming.length ? `<section class="panel"><h2>Friend requests 💌</h2>${incoming.map(r => personRow(r, "wants to be your friend", `<button class="primary" data-accept="${r.requestId}">Accept</button><button class="soft" data-reject="${r.requestId}">Decline</button>${block(r)}`)).join("")}</section>` : "") +
+      (ai ? `<section class="panel"><h2>AI assistant</h2>${personRow(ai, "Your Yakimma helper. AI messages you tips, like what you need to buy something in the Shop.", `<button class="primary" id="aiChat">💬 Chat${ai.unread ? ` <span class="badge" aria-label="${ai.unread} unread">${ai.unread}</span>` : ""}</button>`)}</section>` : "") +
       `<section class="panel"><h2>My friends (${friends.length})</h2>${friends.length ? friends.map(f => personRow(f, `<span class="tone-dot" style="background:${toneHex(f.handTone)}"></span> ${safe(toneName(f.handTone))} hand`, `<button class="primary" data-chat="${f.id}">💬 Chat${f.unread ? ` <span class="badge" aria-label="${f.unread} unread">${f.unread}</span>` : ""}</button><button class="soft" data-salon="${f.id}">💅 Do their nails</button><button class="soft" data-unfriend="${f.id}" data-name="${safe(f.username)}">Remove</button>${block(f)}`)).join("") : `<p class="muted">No friends yet. Send a request above! 🌸</p>`}</section>` +
       (outgoing.length ? `<section class="panel"><h2>Sent requests</h2>${outgoing.map(r => personRow(r, "waiting for them to accept…", `<button class="soft" data-reject="${r.requestId}">Cancel</button>`)).join("")}</section>` : "") +
       (blocked.length ? `<section class="panel"><h2>Blocked (${blocked.length})</h2>${blocked.map(p => personRow(p, "blocked", `<button class="soft" data-unblock="${p.id}" data-name="${safe(p.username)}">Unblock</button>`)).join("")}<p class="muted-note">People you block can't send you friend requests, and you won't see their messages or posts.</p></section>` : "");
   }
   function receivedGallery(limit) {
-    if (!state.received.length) return `<p class="muted">No nail sets yet. When a friend does your nails, they show up here. 💌</p>`;
-    return `<div class="gallery">${state.received.slice(0, limit).map(r => `<figure class="look">${handSVG(toneHex(state.user.handTone), r.design, { label:`Nails by ${r.artist}` })}<figcaption><strong>by ${safe(r.artist)}</strong><small>${safe(r.createdAt)}</small></figcaption></figure>`).join("")}</div>`;
+    if (!state.received.length) return `<p class="muted">No nail sets yet. Do your own nails, or when a friend does them, they show up here. 💌</p>`;
+    const by = r => r.artistId === state.user.id ? "you" : r.artist;
+    return `<div class="gallery">${state.received.slice(0, limit).map(r => `<figure class="look">${handSVG(toneHex(state.user.handTone), r.design, { label:`Nails by ${by(r)}` })}<figcaption><strong>by ${safe(by(r))}</strong><small>${safe(r.createdAt)}</small></figcaption></figure>`).join("")}</div>`;
+  }
+  // Whose nails you're doing: one of your friends, or you.
+  function salonClient() {
+    const id = state.salon?.friendId;
+    if (state.user && id === state.user.id) return { id, username: state.user.username, handTone: state.user.handTone, self: true };
+    return state.social.friends.find(f => f.id === id);
   }
   function nailsPage() {
-    const top = hero("Yakimma Nail Salon 💅", "Pick your hand, choose a friend, and give them a fresh set.", "NAIL SALON");
+    const top = hero("Yakimma Nail Salon 💅", "Pick your hand, then give yourself or a friend a fresh set.", "NAIL SALON");
     if (!state.user) return top + signInPanel("Sign in to visit the Nail Salon.");
     if (!state.inventory.includes("nails")) {
       const p = state.products.find(x => x.id === "nails") || { price: 1, currency: "LC" };
       const have = p.currency === "LC" ? state.user.lc : state.user.mc;
       return top + `<section class="panel locked"><div class="lock-icon" aria-hidden="true">🔒</div><h2>The Nail Salon is locked</h2><p>Unlock it in the Shop for <strong>${priceLabel(p)}</strong>. You have ${have} ${p.currency}.</p>${have < p.price ? `<p class="muted-note">${p.currency === "LC" ? "Win LoveCards on the Codes page, or swap 1,000 MC for 1 LC in the Shop." : "Earn MC by posting: every new person's first like on your post gives you 10 MC."}</p>` : ""}<button class="primary" data-page="shop">Go to the Shop</button></section>`;
     }
-    const client = state.salon && state.social.friends.find(f => f.id === state.salon.friendId);
+    const client = state.salon && salonClient();
     if (client) return salonView(client);
     const myTone = state.user.handTone, latest = state.received[0];
+    const clientCard = (id, tone, name, sub) => `<button class="client" data-salon="${id}"><span class="tone-dot big" style="background:${toneHex(tone)}"></span><strong>${name}</strong><small>${sub}</small></button>`;
     return top +
-      `<section class="panel"><h2>Your hand 🖐️</h2><div class="hand-row"><div class="hand-box">${handSVG(toneHex(myTone), latest?.design, { label:"Your hand" })}</div><div><p>Choose the skin tone that matches you. Friends will see your hand in this tone when they do your nails.</p><div class="tones">${state.nailOptions.skinTones.map(t => `<button class="tone ${t.id===myTone?"on":""}" data-tone="${t.id}" style="--tone:${t.hex}" aria-pressed="${t.id===myTone}"><span></span>${safe(t.name)}</button>`).join("")}</div>${latest ? `<p class="muted-note">You're wearing the set ${safe(latest.artist)} made for you.</p>` : ""}</div></div></section>` +
-      `<section class="panel"><h2>Choose a client</h2>${state.social.friends.length ? `<p class="muted-note">Pick a friend to sit at your nail table.</p><div class="clients">${state.social.friends.map(f => `<button class="client" data-salon="${f.id}"><span class="tone-dot big" style="background:${toneHex(f.handTone)}"></span><strong>${safe(f.username)}</strong><small>Start a manicure</small></button>`).join("")}</div>` : `<p>You need friends to do nails! 💅 Each friend needs their own Yakimma account.</p><button class="primary" data-page="friends">Find friends</button>`}</section>` +
-      `<section class="panel"><h2>Nails your friends did for you</h2>${receivedGallery(12)}</section>`;
+      `<section class="panel"><h2>Your hand 🖐️</h2><div class="hand-row"><div class="hand-box">${handSVG(toneHex(myTone), latest?.design, { label:"Your hand" })}</div><div><p>Choose the skin tone that matches you. Friends will see your hand in this tone when they do your nails.</p><div class="tones">${state.nailOptions.skinTones.map(t => `<button class="tone ${t.id===myTone?"on":""}" data-tone="${t.id}" style="--tone:${t.hex}" aria-pressed="${t.id===myTone}"><span></span>${safe(t.name)}</button>`).join("")}</div>${latest ? `<p class="muted-note">${latest.artistId === state.user.id ? "You're wearing the set you made yourself." : `You're wearing the set ${safe(latest.artist)} made for you.`}</p>` : ""}</div></div></section>` +
+      `<section class="panel"><h2>Choose a client</h2><p class="muted-note">Do your own nails, or pick a friend to sit at your nail table.</p><div class="clients">${clientCard(state.user.id, myTone, "You", "Do your own nails")}${state.social.friends.map(f => clientCard(f.id, f.handTone, safe(f.username), "Start a manicure")).join("")}</div>` +
+      (state.social.friends.length ? "" : `<p class="muted-note">Want to do a friend's nails? Each friend needs their own Yakimma account.</p><button class="soft" data-page="friends">Find friends</button>`) + `</section>` +
+      `<section class="panel"><h2>Your nail sets</h2>${receivedGallery(12)}</section>`;
   }
   function salonHand() {
-    const s = state.salon, client = state.social.friends.find(f => f.id === s.friendId);
-    return handSVG(toneHex(client?.handTone), s.design, { selected: s.applyAll ? -1 : s.selected, interactive: true, label: `${client?.username || "Friend"}'s hand` });
+    const s = state.salon, client = salonClient();
+    return handSVG(toneHex(client?.handTone), s.design, { selected: s.applyAll ? -1 : s.selected, interactive: true, label: client?.self ? "Your hand" : `${client?.username || "Friend"}'s hand` });
   }
   function salonView(client) {
     const s = state.salon, o = state.nailOptions, d = s.design, cur = d.nails[s.selected];
@@ -451,10 +479,10 @@
     else tools = `<h3>Nail art</h3><div class="chips">${o.arts.map(x => x.item && !state.inventory.includes(x.item)
       ? `<button class="chip" disabled title="Find the secret code to unlock this sticker">🔒 ${safe(x.name)}</button>`
       : chip("art", x.id, `${x.icon} ${safe(x.name)}`, cur.art === x.id)).join("")}</div><h3>Art colour</h3><div class="chips">${ACCENTS.map(hex => `<button class="swatch ${cur.accent===hex?"on":""}" data-accent="${hex}" style="--c:${hex}" aria-label="Art colour ${hex}" aria-pressed="${cur.accent===hex}"></button>`).join("")}<input type="color" id="customAccent" value="${hexOr(cur.accent, "#ffffff")}" aria-label="Mix your own art colour"></div>`;
-    return hero(`${safe(client.username)}'s manicure 💅`, "Tap a nail to work on just that one, or paint all five together.", "AT YOUR NAIL TABLE") +
+    return hero(client.self ? "Your manicure 💅" : `${safe(client.username)}'s manicure 💅`, "Tap a nail to work on just that one, or paint all five together.", "AT YOUR NAIL TABLE") +
       `<section class="panel"><div class="salon-grid"><div class="stage"><div class="hand-box" id="salonHand">${salonHand()}</div><div class="chips center">${FINGERS.map((f, i) => chip("pick", i, f.name, !s.applyAll && s.selected === i)).join("")}</div><label class="check"><input type="checkbox" id="applyAll" ${s.applyAll?"checked":""}> Paint all 5 nails together</label></div>` +
       `<div class="tools"><div class="steps" role="tablist">${steps.map(([id, l]) => `<button class="step ${s.step===id?"on":""}" data-step="${id}" role="tab" aria-selected="${s.step===id}">${l}</button>`).join("")}</div>${tools}` +
-      `<div class="actions"><button class="primary" id="sendNails">💌 Finish & send to ${safe(client.username)}</button><button class="soft" id="resetNails">Start over</button><button class="soft" id="leaveSalon">Change client</button></div></div></div></section>`;
+      `<div class="actions"><button class="primary" id="sendNails">${client.self ? "💅 Finish & wear them" : `💌 Finish & send to ${safe(client.username)}`}</button><button class="soft" id="resetNails">Start over</button><button class="soft" id="leaveSalon">Change client</button></div></div></div></section>`;
   }
   // Polish changes go on the chosen nail, or every nail when "paint all" is on.
   function paint(field, value, full = true) {
@@ -541,11 +569,8 @@
     const owned = state.inventory.includes(p.id), theme = state.themes.find(t => t.item === p.id);
     if (owned && theme) return activeTheme() === theme.id ? `<button class="soft" disabled>Using ✓</button>` : `<button class="primary" data-use-theme="${theme.id}">Use theme</button>`;
     if (owned) return `<button class="primary" disabled>Owned ✓</button>`;
-    if (!state.user) return `<button class="soft" data-sign-in>Sign in to buy</button>`;
-    // Say how much is missing, rather than a Buy button that can only fail.
-    const have = p.currency === "LC" ? state.user.lc : state.user.mc;
-    if (have < p.price) return `<button class="soft" disabled>Need ${p.price - have} more ${p.currency}</button>`;
-    return `<button class="primary" data-buy="${p.id}">Buy</button>`;
+    // Everything you don't own says Buy. If you can't afford it, AI messages you in Friends with what you need.
+    return state.user ? `<button class="primary" data-buy="${p.id}">Buy</button>` : `<button class="primary" data-sign-in>Buy</button>`;
   }
 
   function myPostsSection() {
@@ -556,8 +581,49 @@
       `<div class="feed">${m.posts.map(postCard).join("") || `<div class="panel empty">You haven't posted yet. Your posts will show up here! 🌸</div>`}` +
       (m.more ? `<button class="soft" id="moreMyPosts">${m.order === "newest" ? "Show older posts ⬇️" : "Show newer posts ⬇️"}</button>` : "") + `</div>`;
   }
+  // ---- Video Speed + Effects (bought in the Shop). Changing them updates the post in place, so the video keeps playing. ----
+  const SPEEDS = [0.5, 1, 1.5, 2];
+  const EFFECTS = [["none", "Normal"], ["sparkle", "✨ Sparkle"], ["vivid", "🌈 Vivid"], ["stars", "🌟 Glowing stars"]];
+  const viewOf = id => (state.viewing[id] ||= { speed: 1, effect: "none", open: null });
+  // Little sparkles or stars scattered over the video, each with its own place, size and timing.
+  function fxParticles(effect) {
+    const n = { sparkle: 18, stars: 12 }[effect], glyph = effect === "stars" ? "★" : "✦";
+    if (!n) return "";
+    const r = (a, b) => (a + Math.random() * (b - a)).toFixed(2);
+    return Array.from({ length: n }, () => `<i style="--x:${r(4, 96)}%;--y:${r(8, 92)}%;--s:${r(10, 24)}px;--d:-${r(0, 4)}s;--t:${r(1.6, 3.2)}s">${glyph}</i>`).join("");
+  }
+  function viewerTool(item, icon, name, id) {
+    if (!state.inventory.includes(item)) return `<button class="soft" data-page="shop" title="Buy ${name} in the Shop to use it">🔒 ${name}</button>`;
+    return `<button class="soft" data-viewer="${item}" data-post="${id}" aria-expanded="${viewOf(id).open === item}">${icon} ${name}</button>`;
+  }
+  function viewerPanel(id) {
+    const v = viewOf(id), chip = (attr, value, label, on) => `<button class="chip ${on ? "on" : ""}" data-${attr}="${value}" data-post="${id}" aria-pressed="${on}">${label}</button>`;
+    if (v.open === "speed") return `<div class="chips viewer-tools" role="group" aria-label="Video speed">${SPEEDS.map(s => chip("set-speed", s, `${s}×`, v.speed === s)).join("")}</div>`;
+    if (v.open === "effects") return `<div class="chips viewer-tools" role="group" aria-label="Video effects">${EFFECTS.map(([e, label]) => chip("set-effect", e, label, v.effect === e)).join("")}</div>`;
+    return "";
+  }
+  // Redraw a post's speed/effect controls (and its effect, when that changed) without touching the video itself.
+  function drawViewer(id, effectChanged = false) {
+    const card = $(`.post[data-post="${id}"]`), v = viewOf(id);
+    if (!card) return;
+    card.querySelector(".viewer").innerHTML = viewerPanel(id);
+    card.querySelectorAll("[data-viewer]").forEach(b => b.setAttribute("aria-expanded", v.open === b.dataset.viewer));
+    const wrap = card.querySelector(".media-wrap");
+    if (wrap && effectChanged) { wrap.className = `media-wrap fx-${v.effect}`; wrap.querySelector(".fx-layer").innerHTML = fxParticles(v.effect); }
+  }
+  // A video starts at normal speed whenever it's drawn, so put back the speed chosen for it.
+  function applySpeeds() {
+    document.querySelectorAll(".post video").forEach(video => { video.defaultPlaybackRate = video.playbackRate = viewOf(video.closest(".post").dataset.post).speed; });
+  }
+  function postMedia(p) {
+    if (!p.mediaUrl) return `<div class="notice">📝 Text post</div>`;
+    if (!p.mediaType?.startsWith("video/")) return `<img class="media" src="${p.mediaUrl}" alt="Post uploaded by ${safe(p.username)}">`;
+    const effect = viewOf(p.id).effect;
+    return `<div class="media-wrap fx-${effect}"><video class="media" src="${p.mediaUrl}" controls playsinline preload="metadata"></video><div class="fx-layer" aria-hidden="true">${fxParticles(effect)}</div></div>`;
+  }
   function postCard(p) {
-    return `<article class="panel post" data-post="${p.id}"><div class="posthead">${avatarHTML(p.avatar)}<div><strong>${safe(p.username)}</strong><br><small>${timeLabel(p.createdAt)}</small></div>${state.user && state.user.id !== p.userId ? `<button class="soft post-block" data-block="${p.userId}" data-name="${safe(p.username)}">🚫 Block</button>` : ""}</div>${p.mediaUrl ? (p.mediaType?.startsWith("video/") ? `<video class="media" src="${p.mediaUrl}" controls playsinline preload="metadata"></video>` : `<img class="media" src="${p.mediaUrl}" alt="Post uploaded by ${safe(p.username)}">`) : `<div class="notice">📝 Text post</div>`}<p>${safe(p.caption)}</p><div class="actions"><button class="soft" data-like="${p.id}" ${!state.user || state.user.id===p.userId?"disabled":""}>${p.liked?"💗 Liked":"🤍 Like"} · ${p.likes}</button>${p.mediaType?.startsWith("video/")?`<button class="soft" data-speed="${p.id}">⏩ Speed</button><button class="soft" data-effects="${p.id}">✨ Effects</button>`:""}</div><div id="viewer-${p.id}"></div></article>`;
+    const video = p.mediaType?.startsWith("video/");
+    return `<article class="panel post" data-post="${p.id}"><div class="posthead">${avatarHTML(p.avatar)}<div><strong>${safe(p.username)}</strong><br><small>${timeLabel(p.createdAt)}</small></div>${state.user && state.user.id !== p.userId ? `<button class="soft post-block" data-block="${p.userId}" data-name="${safe(p.username)}">🚫 Block</button>` : ""}</div>${postMedia(p)}<p>${safe(p.caption)}</p><div class="actions"><button class="soft" data-like="${p.id}" ${!state.user || state.user.id===p.userId?"disabled":""}>${p.liked?"💗 Liked":"🤍 Like"} · ${p.likes}</button>${video ? viewerTool("speed", "⏩", "Speed", p.id) + viewerTool("effects", "✨", "Effects", p.id) : ""}</div><div class="viewer">${video ? viewerPanel(p.id) : ""}</div></article>`;
   }
   function render() {
     applyTheme();
@@ -588,12 +654,109 @@
       html = hero("Your Yakimma profile", "Your posts, wallet, and collection.", "MY PROFILE") +
       `<section class="panel"><div class="posthead">${state.user?`<button class="avatar-edit" id="editAvatar" aria-label="Change profile picture">${avatarHTML(state.user.avatar,"big")}<span class="avatar-edit-badge" aria-hidden="true">✏️</span></button>`:avatarHTML(null,"big")}<div><h2 style="margin:0">${state.user?safe(state.user.username):"Guest"}</h2><small>${state.user?`🔢 Account number ${state.user.accountNumber}`:"Browsing as a guest"}</small></div></div>${state.user?`<div class="row"><span class="pill">🐱 ${state.user.mc} MC</span><span class="pill">💌 ${state.user.lc} LC</span><span class="pill">🎁 ${state.inventory.length} items</span><span class="pill">👯 ${state.social.friends.length} friend${state.social.friends.length===1?"":"s"}</span></div><div class="actions"><button class="soft" id="editAvatarBtn">🎨 Change picture</button><button class="danger" id="logout">Sign out</button></div>`:`<button class="primary" id="openAuth">Create account / Sign in</button>`}</section><section class="panel"><h3>My collection</h3>${state.inventory.length?[...state.products.filter(p=>state.inventory.includes(p.id)).map(p=>`${p.icon} ${safe(p.name)}`),...state.nailOptions.arts.filter(a=>a.item&&state.inventory.includes(a.item)).map(a=>`${a.icon} ${safe(a.name)} sticker`)].map(x=>`<span class="pill">${x}</span> `).join(""):`<p class="muted">Visit the shop to collect something cute.</p>`}</section>` +
       (state.user ? `<section class="panel"><h3>My nails 💅</h3>${receivedGallery(3)}</section>` + myPostsSection() : "");
+    } else if (state.page === "pictures") {
+      html = picturesPage();
+    } else if (state.page === "about") {
+      html = aboutPage();
+    } else if (state.page === "ads") {
+      html = adsPage();
     } else if (state.page === "settings") {
       html = settingsPage();
     }
     $("#main").innerHTML = notice() + html;
+    applySpeeds();
     const log = $("#chatLog");
     if (log) log.scrollTop = log.scrollHeight;
+  }
+  // ---- Camera 📷: takes a picture of the part of the page you can see and keeps it in Pictures 🌇. ----
+  let shotLib = null;
+  // The drawing library is only downloaded the first time someone takes a picture.
+  const loadShotLib = () => shotLib ||= new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "/vendor/modern-screenshot.js";
+    s.onload = () => resolve(window.modernScreenshot);
+    s.onerror = () => { shotLib = null; s.remove(); reject(new Error("The camera couldn't start. Check your connection and try again.")); };
+    document.head.append(s);
+  });
+  const PAGE_NAMES = { feed: "🏡 Feed", create: "✨ Upload", profile: "🌷 Profile", pictures: "🌇 Pictures", settings: "⚙️ Settings", friends: "👯 Friends", groups: "🏘️ Groups", nails: "💅 Nail Salon", shop: "🛍️ Shop", codes: "👩‍💻 Codes", about: "🎀 About The Creator", ads: "🎉 Advertisement" };
+  // Where a picture was taken, shown with it in Pictures.
+  function placeName() {
+    const c = state.chat, g = state.groupView?.group, client = state.page === "nails" && state.salon && salonClient();
+    if (g) return `${g.icon} ${g.name}`;
+    if (c?.ai) return "🤖 Chat with AI";
+    if (c?.friendId) return `💬 Chat with ${state.social.friends.find(f => f.id === c.friendId)?.username || "a friend"}`;
+    if (client) return client.self ? "💅 Your manicure" : `💅 ${client.username}'s manicure`;
+    return PAGE_NAMES[state.page] || "Yakimma";
+  }
+  // A short note at the bottom that doesn't redraw the page, so videos keep playing and nothing you typed is lost.
+  function snap(message, error = false) {
+    $("#snap")?.remove();
+    document.body.insertAdjacentHTML("beforeend", `<div class="snap notice ${error ? "error" : ""}" id="snap" role="status">${safe(message)}${error ? "" : `<button class="soft" data-page="pictures">See it</button>`}</div>`);
+    const note = $("#snap");
+    setTimeout(() => note.remove(), 4000);
+  }
+  async function takePicture() {
+    const main = $("#main"), btn = $("#cameraBtn"), barBottom = $(".topbar").getBoundingClientRect().bottom, box = main.getBoundingClientRect();
+    // Only what's on screen: from just under the top bar to the bottom of the window.
+    const from = Math.max(0, barBottom - box.top), to = Math.min(box.height, innerHeight - box.top);
+    if (to - from < 40) return snap("Scroll to something on the page, then take a picture.", true);
+    // Photos you can't see are left out, so a long feed doesn't make the camera slow. They keep their size, so nothing moves.
+    const offscreen = [...main.querySelectorAll("img")].filter(img => { const r = img.getBoundingClientRect(); return r.bottom < barBottom || r.top > innerHeight; });
+    offscreen.forEach(img => { img.dataset.offscreen = ""; });
+    btn.disabled = true;
+    const flash = document.createElement("div");
+    flash.className = "camera-flash"; flash.setAttribute("aria-hidden", "true");
+    document.body.append(flash); setTimeout(() => flash.remove(), 600);
+    try {
+      const { domToBlob } = await loadShotLib();
+      const blob = await domToBlob(main, {
+        type: "image/jpeg", quality: 0.9, scale: Math.min(devicePixelRatio || 1, 2),
+        width: box.width, height: to - from, style: { transform: `translateY(${-from}px)` },
+        backgroundColor: getComputedStyle(document.body).backgroundColor,
+        features: { restoreScrollPosition: true },
+        onCloneEachNode: node => { if (node.dataset && "offscreen" in node.dataset) { node.removeAttribute("src"); node.removeAttribute("srcset"); } }
+      });
+      const body = new FormData();
+      body.append("picture", blob, "picture.jpg"); body.append("place", placeName());
+      const d = await api("/api/pictures", { method: "POST", body });
+      if (state.page === "pictures") { state.pictures = d; render(); }
+      snap("📸 Picture saved in 🌇 Pictures!");
+    } catch (err) { snap(err.message || "The picture didn't work. Try again.", true); }
+    finally { offscreen.forEach(img => delete img.dataset.offscreen); btn.disabled = false; }
+  }
+  // A note from the person who made Yakimma, in her own words.
+  function aboutPage() {
+    return hero("About The Creator 🎀", "", "MEET THE CREATOR") +
+      `<section class="panel about"><p>Hello, My name is Mahdiya Faiza Manha I created this website and if you're wondering why is there 'Craftora Labs' in the link? well because its my dad's some sort of website I dont know so I build this with Claude Code in Terminal it's pretty easy I build this for the love of y'all Byeeee</p><p class="signature">- Luv by Mahdiya Faiza Manha</p></section>`;
+  }
+  // Links chosen by the person who made Yakimma. They open in a new tab, and each button says which website it goes to.
+  const ADS = [
+    { icon: "💼", title: "My Dad's Business", name: "Biponi Labs", url: "https://www.facebook.com/people/Biponi-Labs/61594900898203/?sk=followers" },
+    { icon: "▶️", title: "Follow Me On YouTube!", name: "@Offical-manhatukfayay_theCutie", url: "https://www.youtube.com/@Offical-manhatukfayay_theCutie" },
+    { icon: "📲", title: "Install This App!", name: "Fax Hero: Send Fax from iPhone", url: "https://apps.apple.com/us/app/fax-hero-send-fax-from-iphone/id6670707717" }
+  ];
+  function adsPage() {
+    return hero("Advertisement 🎉", "", "ADVERTISEMENT") +
+      `<div class="ads">${ADS.map(a => `<article class="panel ad"><div class="ad-icon" aria-hidden="true">${a.icon}</div><h2>${safe(a.title)}</h2><p class="muted-note">${safe(a.name)}</p>` +
+        `<a class="primary link-button" href="${safe(a.url)}" target="_blank" rel="noopener noreferrer">Open ${safe(new URL(a.url).hostname.replace(/^www\./, ""))} ↗</a></article>`).join("")}</div>`;
+  }
+  function picturesPage() {
+    const top = hero("Pictures 🌇", "Tap 📷 at the top of the screen to take a picture of anything on Yakimma: your nails, a friend's nails, a chat, a video… Only you can see your pictures.", "MY PICTURES");
+    if (!state.user) return top + signInPanel("Sign in to take pictures.");
+    if (!state.pictures) return top + `<section class="panel"><p class="muted">Loading your pictures…</p></section>`;
+    const { pictures, max } = state.pictures;
+    return top + `<section class="panel"><h2>My pictures (${pictures.length}/${max})</h2>${pictures.length
+      ? `<div class="pictures">${pictures.map(p => `<button class="picture" data-picture="${p.id}"><img src="${safe(p.url)}" alt="Picture of ${safe(p.place)}" loading="lazy"><strong>${safe(p.place)}</strong><small>${timeLabel(p.createdAt)}</small></button>`).join("")}</div>`
+      : `<p class="muted">No pictures yet. Tap 📷 at the top to take your first one! 📸</p>`}</section>`;
+  }
+  function openPicture(id) {
+    const p = state.pictures?.pictures.find(x => x.id === id);
+    if (!p) return;
+    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal picture-modal" role="dialog" aria-modal="true" aria-labelledby="pictureTitle"><div class="row between"><h2 id="pictureTitle">${safe(p.place)}</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
+      `<img class="picture-full" src="${safe(p.url)}" alt="Picture of ${safe(p.place)}"><small>${timeLabel(p.createdAt)}</small>` +
+      `<div class="actions"><a class="primary link-button" href="${safe(p.url)}" download="yakimma-picture-${p.id}.jpg">⬇️ Save to device</a><button class="danger" data-delete-picture="${p.id}">🗑️ Delete</button></div></section></div>`;
+    $("#closeModal").onclick = closeModal;
+    $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
   }
   // Eye open = password is hidden (tap to show); eye closed = password is showing (tap to hide).
   const EYE_OPEN = `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>`;
@@ -762,10 +925,19 @@
       if(["editAvatar","editAvatarBtn","menuAvatar"].includes(b.id)){openAvatarEditor();return;}
       if(b.dataset.myOrder){state.myPosts={...state.myPosts,order:b.dataset.myOrder};await loadMyPosts();render();return;}
       if(b.id==="moreMyPosts"){b.disabled=true;await loadMyPosts(true);render();return;}
-      if(b.id==="logout"){await api("/api/logout",{method:"POST"});state.groupView=null;state.chat=null;state.myPosts=null;await refresh();state.page="feed";toast("You're signed out. See you soon! 👋");return;}
+      if(b.id==="logout"){await api("/api/logout",{method:"POST"});state.groupView=null;state.chat=null;state.myPosts=null;state.pictures=null;await refresh();state.page="feed";toast("You're signed out. See you soon! 👋");return;}
       if(b.dataset.like){const d=await api(`/api/posts/${b.dataset.like}/like`,{method:"POST"});if(state.groupView)state.groupView.posts=d.posts;else state.posts=d.posts;state.user=d.user;state.notice=d.rewarded?"You earned 10 MC! 🐱":"";render();return;}
       if(b.id==="exchange"){const d=await api("/api/exchange",{method:"POST"});state.user=d.user;toast("Exchanged 1,000 MC for 1 LoveCard! 💌");return;}
-      if(b.dataset.buy){const d=await api(`/api/shop/${b.dataset.buy}/buy`,{method:"POST"});state.user=d.user;state.inventory=d.inventory;const t=state.themes.find(x=>x.item===b.dataset.buy);toast(t?`${t.name} theme is on! ${t.icon} You can switch themes any time in Settings.`:"Purchased! ✨");return;}
+      if(b.dataset.buy){
+        let d;
+        // If you can't afford it, AI has just messaged you, so update the Friends badge straight away.
+        try{d=await api(`/api/shop/${b.dataset.buy}/buy`,{method:"POST"});}catch(err){toast(err.message,true);state.social=await api("/api/friends");friendsBadge();return;}
+        state.user=d.user;state.inventory=d.inventory;const t=state.themes.find(x=>x.item===b.dataset.buy);toast(t?`${t.name} theme is on! ${t.icon} You can switch themes any time in Settings.`:"Purchased! ✨");return;
+      }
+      if(b.id==="aiChat"){await openAIChat();return;}
+      if(b.id==="cameraBtn"){if(state.user)await takePicture();else openAuth("login");return;}
+      if(b.dataset.picture){openPicture(Number(b.dataset.picture));return;}
+      if(b.dataset.deletePicture){if(!confirm("Delete this picture?"))return;state.pictures=await api(`/api/pictures/${b.dataset.deletePicture}`,{method:"DELETE"});closeModal();toast("Picture deleted.");return;}
       if(b.dataset.useTheme){await useTheme(b.dataset.useTheme);return;}
       // Joining takes you straight into the group's chat.
       if(b.dataset.joinGroup){setGroups(await api(`/api/groups/${b.dataset.joinGroup}/join`,{method:"POST"}));await openGroup(b.dataset.joinGroup);toast("You joined the group! 🎉 Say hi in the chat.");return;}
@@ -805,13 +977,18 @@
         if(b.id==="resetNails"){s.design=newDesign();render();return;}
         if(b.id==="leaveSalon"){state.salon=null;render();return;}
         if(b.id==="sendNails"){
-          const name=state.social.friends.find(f=>f.id===s.friendId)?.username||"your friend";
+          const client=salonClient();
           await api("/api/nails",send("POST",{friendId:s.friendId,design:s.design}));
-          state.salon=null;toast(`All done! ${name} can see their new nails on their profile. 💌`);return;
+          state.salon=null;
+          if(client?.self){await loadSocial();toast("All done! You're wearing your new nails. 💅 They're on your profile too.");}
+          else toast(`All done! ${client?.username||"Your friend"} can see their new nails on their profile. 💌`);
+          return;
         }
       }
-      if(b.dataset.speed){const card=b.closest(".post"), video=card?.querySelector("video");if(!video){toast("This post has no video player.",true);return;}const speed=prompt("Choose playback speed: 0.5, 1, 1.5, or 2","1.5");if(["0.5","1","1.5","2"].includes(speed)){video.playbackRate=Number(speed);toast("Playback speed set to "+speed+"×");}return;}
-      if(b.dataset.effects){const card=b.closest(".post");if(!card)return;const effect=prompt("Viewing effect: normal, sparkle, soft, or mono","sparkle");card.style.filter=effect==="mono"?"grayscale(1)":effect==="soft"?"saturate(1.3) brightness(1.05)":effect==="sparkle"?"saturate(1.5) hue-rotate(8deg)":"none";return;}
+      // Speed and Effects change the post in place (no full redraw), so the video keeps playing.
+      if(b.dataset.viewer){const v=viewOf(b.dataset.post);v.open=v.open===b.dataset.viewer?null:b.dataset.viewer;drawViewer(b.dataset.post);return;}
+      if(b.dataset.setSpeed){const v=viewOf(b.dataset.post);v.speed=Number(b.dataset.setSpeed);drawViewer(b.dataset.post);applySpeeds();return;}
+      if(b.dataset.setEffect){viewOf(b.dataset.post).effect=b.dataset.setEffect;drawViewer(b.dataset.post,true);return;}
     } catch(err){toast(err.message,true);}
   });
   // Colour pickers update the hand live while dragging, then redraw the tools when the picker closes.

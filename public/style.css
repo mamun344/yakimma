@@ -156,3 +156,47 @@ button.bubble:hover{transform:none;filter:brightness(.98)}
 .code-row small{margin-left:0;width:100%}
 .quick .emoji-btn{width:34px;height:34px;font-size:1.25rem}
 }
+
+/* Video Speed + Effects. The effect layer sits over the video and lets taps through to its controls. */
+.viewer-tools{margin-top:10px}
+.media-wrap{position:relative;border-radius:16px;transition:box-shadow .3s}
+.media-wrap .media{display:block;transition:filter .3s}
+.fx-layer{position:absolute;inset:0;overflow:hidden;border-radius:16px;pointer-events:none}
+.fx-layer i{position:absolute;left:var(--x);top:var(--y);font-size:var(--s);font-style:normal;line-height:1;opacity:0}
+.fx-sparkle .fx-layer i{color:#fff;text-shadow:0 0 4px #fff,0 0 10px #ffe9a8,0 0 18px #ff8fc0;animation:twinkle var(--t) ease-in-out var(--d) infinite}
+.fx-vivid .media{filter:saturate(1.9) contrast(1.15) brightness(1.04)}
+.fx-stars{box-shadow:0 0 26px 4px #ffd86b88}
+.fx-stars .media{filter:brightness(1.05) saturate(1.15)}
+.fx-stars .fx-layer i{color:#ffe27a;text-shadow:0 0 6px #ffd23f,0 0 14px #ffb300,0 0 24px #ff9d00;animation:rise calc(var(--t) * 2) ease-in-out var(--d) infinite}
+@keyframes twinkle{0%,100%{opacity:0;transform:translate(-50%,-50%) scale(.2) rotate(0)}50%{opacity:1;transform:translate(-50%,-50%) scale(1) rotate(90deg)}}
+@keyframes rise{0%{opacity:0;transform:translate(-50%,-50%) translateY(24px) scale(.7)}25%,75%{opacity:1}50%{transform:translate(-50%,-50%) translateY(-6px) scale(1.15)}100%{opacity:0;transform:translate(-50%,-50%) translateY(-36px) scale(.8)}}
+@media(prefers-reduced-motion:reduce){.fx-layer i{animation:none!important;opacity:.9;transform:translate(-50%,-50%)}}
+
+/* Camera 📷 + Pictures 🌇 */
+.camera-btn{padding:8px 10px;font-size:1.15rem;line-height:1}
+.camera-flash{position:fixed;inset:0;z-index:30;background:#fff;pointer-events:none;animation:camflash .5s ease-out forwards}
+@keyframes camflash{from{opacity:.85}to{opacity:0}}
+.snap{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:25;margin:0;display:flex;align-items:center;gap:10px;width:max-content;max-width:calc(100% - 32px);box-shadow:var(--shadow)}
+.snap button{padding:6px 10px}
+.pictures{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}
+.picture{display:flex;flex-direction:column;gap:4px;padding:6px;text-align:left;background:var(--surface2);border:1px solid var(--line);color:var(--ink);min-width:0}
+.picture img{display:block;width:100%;aspect-ratio:4/3;object-fit:cover;object-position:top;border-radius:10px;background:var(--surface)}
+.picture strong{font-size:.88rem;overflow-wrap:anywhere}
+.picture-modal{width:min(860px,100%)}
+.picture-full{display:block;width:100%;margin:6px 0;border-radius:14px;border:1px solid var(--line)}
+a.link-button{display:inline-block;border-radius:14px;padding:10px 14px;font-weight:750;text-decoration:none}
+@media(prefers-reduced-motion:reduce){.camera-flash{animation:none;opacity:0}}
+/* On narrow phones the top bar only has room for the logo, the camera, the wallet and your account. */
+@media(max-width:440px){.brand-name{display:none}.top-actions{gap:6px}.topbar{gap:8px}.camera-btn{padding:7px 8px}.wallet{padding:7px 8px}}
+
+/* About The Creator */
+.about p{margin:0 0 12px;font-size:1.05rem;line-height:1.7;overflow-wrap:anywhere}
+.about .signature{margin:0;text-align:right;font-weight:800;color:var(--nav-ink)}
+
+/* Advertisement */
+.ads{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.ad{margin:0;display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center}
+.ad h2{margin:0;font-size:1.15rem}
+.ad p{margin:0;overflow-wrap:anywhere}
+.ad-icon{font-size:2.4rem}
+.ad .link-button{margin-top:auto}

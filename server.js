@@ -137,6 +137,24 @@ CREATE TABLE IF NOT EXISTS blocks (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY(blocker_id, blocked_id)
 );
+-- Pictures someone took of the website with the 📷 camera. Only they can see them, on their Pictures page.
+CREATE TABLE IF NOT EXISTS pictures (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  path TEXT NOT NULL,
+  place TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS pictures_user ON pictures(user_id, id);
+-- Messages from the AI assistant to one person. AI isn't a real account, so it never uses up an account number.
+CREATE TABLE IF NOT EXISTS ai_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  read_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ai_messages_user ON ai_messages(user_id, id);
 CREATE TABLE IF NOT EXISTS code_redemptions (
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   code TEXT NOT NULL,
@@ -297,6 +315,7 @@ const friendLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 40, standardH
 const codeLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, skipSuccessfulRequests: true, standardHeaders: true, legacyHeaders: false, message: { error: "Too many wrong codes. Please wait 15 minutes and try again." } });
 const messageLimiter = rateLimit({ windowMs: 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false, message: { error: "You're sending messages very fast. Take a little break and try again." } });
 const reactionLimiter = rateLimit({ windowMs: 60 * 1000, limit: 60, standardHeaders: true, legacyHeaders: false, message: { error: "You're reacting very fast. Take a little break and try again." } });
+const pictureLimiter = rateLimit({ windowMs: 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false, message: { error: "You're taking pictures very fast. Take a little break and try again." } });
 const groupLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false, message: { error: "You're making groups very fast. Please wait a little while." } });
 const upload = multer({
   storage: multer.diskStorage({
@@ -321,6 +340,16 @@ const avatarUpload = multer({
   }),
   limits: { fileSize: 5 * 1024 * 1024, files: 1 },
   fileFilter: (_req, file, cb) => cb(AVATAR_TYPES[file.mimetype] ? null : new Error("Choose a JPG, PNG, GIF, or WebP picture."), Boolean(AVATAR_TYPES[file.mimetype]))
+});
+// Pictures taken with the 📷 camera. The browser draws them as JPEGs; each person can keep up to MAX_PICTURES.
+const MAX_PICTURES = 100;
+const pictureUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, uploadDir),
+    filename: (_req, _file, cb) => cb(null, `picture-${crypto.randomUUID()}.jpg`)
+  }),
+  limits: { fileSize: 10 * 1024 * 1024, files: 1 },
+  fileFilter: (_req, file, cb) => cb(file.mimetype === "image/jpeg" ? null : new Error("Pictures must be JPEGs."), file.mimetype === "image/jpeg")
 });
 // Check the file's first bytes so only real images are kept, whatever the browser claimed.
 function isImageFile(filePath) {
@@ -362,6 +391,21 @@ function areFriends(a, b) {
   return Boolean(db.prepare(`SELECT 1 FROM friendships WHERE status='accepted'
     AND ((requester_id=? AND addressee_id=?) OR (requester_id=? AND addressee_id=?))`).get(a, b, b, a));
 }
+// The AI assistant in Friends. It has its own chat with each person, where it sends tips (like how to afford something in the Shop).
+const AI = { userId: 0, username: "AI", avatar: { emoji: "🤖", bg: "sky", photoUrl: null } };
+// Send someone a message from AI, unless it would just repeat the last thing AI told them.
+function aiSay(userId, body) {
+  if (db.prepare("SELECT body FROM ai_messages WHERE user_id=? ORDER BY id DESC LIMIT 1").get(userId)?.body === body) return;
+  db.prepare("INSERT INTO ai_messages(user_id,body) VALUES(?,?)").run(userId, body);
+}
+// The newest 100 AI messages (or only the ones after `since`), shaped like chat messages so the chat box can show them.
+function aiMessages(userId, since = 0) {
+  const rows = db.prepare("SELECT * FROM (SELECT id, body, created_at AS createdAt FROM ai_messages WHERE user_id=? AND id>? ORDER BY id DESC LIMIT 100) ORDER BY id").all(userId, since);
+  return {
+    messages: rows.map(m => ({ id: m.id, rev: m.id, ...AI, body: m.body, forwarded: false, createdAt: m.createdAt, editedAt: null, deleted: false, reactions: [] })),
+    rev: db.prepare("SELECT COALESCE(MAX(id), 0) AS rev FROM ai_messages WHERE user_id=?").get(userId).rev
+  };
+}
 function friendsPayload(userId) {
   const rows = db.prepare(`
     SELECT f.id, f.status, f.requester_id AS requesterId, f.created_at AS createdAt,
@@ -375,6 +419,7 @@ function friendsPayload(userId) {
   const pending = rows.filter(r => r.status === "pending");
   const request = r => ({ requestId: r.id, userId: r.userId, username: r.username, avatar: avatarOf(r), createdAt: r.createdAt });
   return {
+    ai: { ...AI, unread: db.prepare("SELECT COUNT(*) AS n FROM ai_messages WHERE user_id=? AND read_at IS NULL").get(userId).n },
     friends: rows.filter(r => r.status === "accepted").map(r => ({ id: r.userId, username: r.username, handTone: r.handTone, avatar: avatarOf(r), unread: r.unread })),
     incoming: pending.filter(r => r.requesterId !== userId).map(request),
     outgoing: pending.filter(r => r.requesterId === userId).map(request),
@@ -384,7 +429,7 @@ function friendsPayload(userId) {
 }
 function receivedDesigns(userId) {
   return db.prepare(`
-    SELECT d.id, d.design, d.created_at AS createdAt, u.username AS artist
+    SELECT d.id, d.design, d.created_at AS createdAt, d.artist_id AS artistId, u.username AS artist
     FROM nail_designs d JOIN users u ON u.id=d.artist_id
     WHERE d.client_id=? AND NOT EXISTS(SELECT 1 FROM blocks b WHERE b.blocker_id=d.client_id AND b.blocked_id=d.artist_id)
     ORDER BY d.id DESC LIMIT 12
@@ -547,8 +592,7 @@ app.post("/api/signup", authLimiter, async (req, res, next) => {
     const password = String(req.body.password || "");
     if (/\s/.test(username)) return res.status(400).json({ error: "Do not use spaces. Usernames can only have letters and numbers." });
     if (/[^A-Za-z0-9]/.test(username)) return res.status(400).json({ error: "Do not use symbols. Usernames can only have letters and numbers." });
-    if (username.length < 3 || username.length > 20) return res.status(400).json({ error: "Username must be 3–20 letters or numbers." });
-    // Passwords can have any letters, numbers, symbols or emojis, but no spaces.
+    if (username.length < 3 || username.length > 20) return res.status(400).json({ error: "Username must be 3–20 letters or numbers." });    // Passwords can have any letters, numbers, symbols or emojis, but no spaces.
     if (/\s/.test(password)) return res.status(400).json({ error: "Do not use spaces in your password." });
     if (password.length < 8 || password.length > 200) return res.status(400).json({ error: "Password must be 8–200 characters." });
     const hash = await bcrypt.hash(password, 12);
@@ -665,9 +709,14 @@ app.post("/api/shop/:itemId/buy", requireAuth, (req, res) => {
   if (!p) return res.status(404).json({ error: "That item does not exist." });
   const tx = db.transaction(() => {
     if (db.prepare("SELECT 1 FROM inventory WHERE user_id=? AND item_id=?").get(req.session.userId, p.id)) return { error: "You already own this item." };
-    const u = db.prepare("SELECT mc,lc FROM users WHERE id=?").get(req.session.userId);
-    if (p.currency === "MC" && u.mc < p.price) return { error: "Not enough MC." };
-    if (p.currency === "LC" && u.lc < p.price) return { error: "Not enough LC." };
+    const u = db.prepare("SELECT mc,lc FROM users WHERE id=?").get(req.session.userId), have = p.currency === "MC" ? u.mc : u.lc;
+    // Every item has a Buy button. If you can't afford it, AI tells you in Friends how much more you need and how to get it.
+    if (have < p.price) {
+      const howTo = p.currency === "MC" ? "🐱 Earn MC by posting: every new person's first like on your post gives you 10 MC. Secret codes on the Codes page can give MC too!"
+        : "💌 Win LoveCards on the Codes page, or swap 1,000 MC for 1 LC in the Shop.";
+      aiSay(req.session.userId, `Hi! You tried to buy ${p.icon} ${p.name}. It costs ${p.price} ${p.currency} and you have ${have} ${p.currency}, so you need ${p.price - have} more ${p.currency}. ${howTo}`);
+      return { error: `You can't afford ${p.name} yet. 🤖 AI sent you a message in Friends.` };
+    }
     if (p.currency === "MC") db.prepare("UPDATE users SET mc=mc-? WHERE id=?").run(p.price, req.session.userId);
     else db.prepare("UPDATE users SET lc=lc-? WHERE id=?").run(p.price, req.session.userId);
     db.prepare("INSERT INTO inventory(user_id,item_id) VALUES(?,?)").run(req.session.userId, p.id);
@@ -801,6 +850,12 @@ app.post("/api/groups/:id/posts", requireAuth, (req, res, next) => {
 });
 
 app.get("/api/friends", requireAuth, (req, res) => res.json(friendsPayload(req.session.userId)));
+
+// Your chat with the AI assistant. Opening or checking it marks AI's messages as read.
+app.get("/api/ai/messages", requireAuth, (req, res) => {
+  db.prepare("UPDATE ai_messages SET read_at=CURRENT_TIMESTAMP WHERE user_id=? AND read_at IS NULL").run(req.session.userId);
+  res.json(aiMessages(req.session.userId, sinceRev(req.query.since)));
+});
 
 app.post("/api/friends/request", requireAuth, friendLimiter, (req, res) => {
   const me = req.session.userId;
@@ -996,7 +1051,8 @@ app.get("/api/nails", requireAuth, (req, res) => res.json({ received: receivedDe
 app.post("/api/nails", requireAuth, (req, res) => {
   const me = req.session.userId, friendId = Number(req.body.friendId);
   if (!ownsItem(me, "nails")) return res.status(403).json({ error: "Unlock Nails in the Shop first." });
-  if (!Number.isSafeInteger(friendId) || !areFriends(me, friendId)) return res.status(403).json({ error: "You can only do nails for your friends." });
+  // You can do your own nails, or a friend's.
+  if (friendId !== me && (!Number.isSafeInteger(friendId) || !areFriends(me, friendId))) return res.status(403).json({ error: "You can only do nails for yourself or your friends." });
   const design = cleanDesign(req.body.design);
   if (!design) return res.status(400).json({ error: "That nail design isn't valid." });
   const locked = design.nails.map(n => nailOptions.arts.find(a => a.id === n.art)).find(a => a.item && !ownsItem(me, a.item));
@@ -1004,6 +1060,40 @@ app.post("/api/nails", requireAuth, (req, res) => {
   const result = db.prepare("INSERT INTO nail_designs(artist_id,client_id,design) VALUES(?,?,?)").run(me, friendId, JSON.stringify(design));
   res.status(201).json({ designId: Number(result.lastInsertRowid) });
 });
+
+const picturesPayload = userId => ({
+  pictures: db.prepare("SELECT id, path, place, created_at AS createdAt FROM pictures WHERE user_id=? ORDER BY id DESC").all(userId)
+    .map(p => ({ id: p.id, url: `/uploads/${encodeURIComponent(p.path)}`, place: p.place, createdAt: p.createdAt })),
+  max: MAX_PICTURES
+});
+app.get("/api/pictures", requireAuth, (req, res) => res.json(picturesPayload(req.session.userId)));
+
+app.post("/api/pictures", requireAuth, pictureLimiter, (req, res, next) => {
+  pictureUpload.single("picture")(req, res, err => {
+    if (err) return res.status(400).json({ error: err.code === "LIMIT_FILE_SIZE" ? "That picture is too big to save." : err.message || "The picture couldn't be saved." });
+    if (!req.file) return res.status(400).json({ error: "No picture was taken." });
+    const me = req.session.userId, drop = () => fs.unlink(req.file.path, () => {});
+    try {
+      if (!isImageFile(req.file.path)) { drop(); return res.status(400).json({ error: "That isn't a picture we can keep." }); }
+      if (db.prepare("SELECT COUNT(*) AS n FROM pictures WHERE user_id=?").get(me).n >= MAX_PICTURES) {
+        drop(); return res.status(400).json({ error: `You have ${MAX_PICTURES} pictures. Delete some in Pictures 🌇 to take more.` });
+      }
+      db.prepare("INSERT INTO pictures(user_id,path,place) VALUES(?,?,?)").run(me, req.file.filename, cleanText(req.body.place).slice(0, 60));
+      res.status(201).json(picturesPayload(me));
+    } catch (e) { drop(); next(e); }
+  });
+});
+
+app.delete("/api/pictures/:id", requireAuth, (req, res) => {
+  const me = req.session.userId, picture = db.prepare("SELECT id, path FROM pictures WHERE id=? AND user_id=?").get(Number(req.params.id), me);
+  if (!picture) return res.status(404).json({ error: "That picture isn't there any more." });
+  db.prepare("DELETE FROM pictures WHERE id=?").run(picture.id);
+  fs.unlink(path.join(uploadDir, path.basename(picture.path)), () => {});
+  res.json(picturesPayload(me));
+});
+
+// The library the 📷 camera uses to draw the page into a picture. The browser only loads it the first time you take one.
+app.get("/vendor/modern-screenshot.js", (_req, res) => res.sendFile(path.join(__dirname, "node_modules", "modern-screenshot", "dist", "index.js")));
 
 app.get("/uploads/:filename", (req, res) => {
   const filename = path.basename(req.params.filename);
