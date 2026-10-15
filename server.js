@@ -8,6 +8,11 @@ const Database = require("better-sqlite3");
 const multer = require("multer");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
+const { mailSettings, createMailer } = require("./email");
+
+// Private settings (like the email app password below) can go in a .env file next to this one. It's never committed.
+const envFile = path.join(__dirname, ".env");
+if (fs.existsSync(envFile)) process.loadEnvFile(envFile);
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -155,6 +160,15 @@ CREATE TABLE IF NOT EXISTS ai_messages (
   read_at TEXT
 );
 CREATE INDEX IF NOT EXISTS ai_messages_user ON ai_messages(user_id, id);
+-- Someone part-way through turning on 18+: where their email code went, the code (hashed), and whether they've entered it.
+CREATE TABLE IF NOT EXISTS adult_checks (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  email TEXT NOT NULL,
+  code_hash TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  tries INTEGER NOT NULL DEFAULT 0,
+  email_ok INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS code_redemptions (
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   code TEXT NOT NULL,
@@ -169,12 +183,21 @@ for (const [name, definition] of [
   ["avatar_emoji", "TEXT NOT NULL DEFAULT '🌷'"],
   ["avatar_bg", "TEXT NOT NULL DEFAULT 'cotton'"],
   ["avatar_path", "TEXT"],
-  ["theme", "TEXT NOT NULL DEFAULT 'pink'"]
+  ["theme", "TEXT NOT NULL DEFAULT 'pink'"],
+  // When they passed the 18+ checks (see the 18+ zone below), and whether they're in the 18+ zone right now.
+  ["adult_verified_at", "TEXT"],
+  ["adult_on", "INTEGER NOT NULL DEFAULT 0"],
+  // The 18+ zone has its own theme (Blood to start with), so leaving the zone brings back your normal one.
+  ["zone_theme", "TEXT NOT NULL DEFAULT 'blood'"]
 ]) {
   if (!userColumns.includes(name)) db.exec(`ALTER TABLE users ADD COLUMN ${name} ${definition}`);
 }
 // Posts made inside a group have its key (see findGroup) and only show in that group, never on the main feed.
 if (!db.prepare("PRAGMA table_info(posts)").all().some(c => c.name === "group_key")) db.exec("ALTER TABLE posts ADD COLUMN group_key TEXT");
+// Posts and groups made in the 18+ zone are marked adult, and only show there.
+for (const table of ["posts", "community_groups"]) {
+  if (!db.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === "adult")) db.exec(`ALTER TABLE ${table} ADD COLUMN adult INTEGER NOT NULL DEFAULT 0`);
+}
 db.exec("CREATE INDEX IF NOT EXISTS posts_group ON posts(group_key, id)");
 db.exec("CREATE INDEX IF NOT EXISTS posts_user ON posts(user_id, id)");
 // Chats used to be kept in two tables. Move any old messages into `messages` once, then remove the old tables.
@@ -200,7 +223,9 @@ const themes = [
   { id: "rose", name: "Rose Pink", icon: "🌹", art: "🌹💗" },
   { id: "mint", name: "Mint Teal", icon: "🍃", art: "🍃🩵" },
   { id: "goth", name: "Goth", icon: "🖤", art: "🦇🖤", item: "goth" },
-  { id: "pastel", name: "Pastel", icon: "🩷", art: "🌈🍭", item: "pastel" }
+  { id: "pastel", name: "Pastel", icon: "🩷", art: "🌈🍭", item: "pastel" },
+  // A gift for entering the 18+ zone, yours to keep. It's never in the Shop, and Settings only lists it for people who have it.
+  { id: "blood", name: "Blood", icon: "🩸", art: "🩸🥀", item: "blood-theme", gift: true }
 ];
 // Secret codes for the Codes page. Each account can use each code once. Change the prizes here.
 // A prize can be MC, LC, an `item` (a nail sticker from nailOptions.arts) or a `group` (one of secretGroups).
@@ -277,6 +302,16 @@ const avatarOptions = {
 };
 const hasOption = (list, id) => list.some(o => o.id === id);
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+// A nail wears as much art as you like, each piece in its own colour: arts = [{ id, color }].
+// Older sets stored one `art` with one `accent` colour, so turn those into a list too.
+const nailArtsOf = n => Array.isArray(n?.arts) ? n.arts : n?.art && n.art !== "none" ? [{ id: n.art, color: n.accent }] : [];
+const upgradeDesign = d => ({ ...d, nails: d.nails.map(n => ({ color: n.color, finish: n.finish, arts: nailArtsOf(n) })) });
+// Where a piece of art sits once it's been moved, sized or turned (see artPlaces in app.js). Art that's never been
+// moved has none of these and sits at its home spot. Moved art has all four.
+const ART_PLACE = { x: [-1, 1], y: [0, 1], size: [0.3, 3], turn: [-180, 180] };
+const artPlaceOf = a => Object.keys(ART_PLACE).some(k => a?.[k] !== undefined)
+  ? Object.fromEntries(Object.keys(ART_PLACE).map(k => [k, Math.round(Number(a[k]) * 1000) / 1000])) : {};
+const placeOk = a => Object.entries(ART_PLACE).every(([k, [lo, hi]]) => a[k] === undefined || (a[k] >= lo && a[k] <= hi));
 // Only accept designs built from known options so stored data is always safe to render.
 function cleanDesign(input) {
   if (!input || typeof input !== "object") return null;
@@ -285,11 +320,12 @@ function cleanDesign(input) {
   const nails = input.nails.map(n => ({
     color: String(n?.color || "").toLowerCase(),
     finish: n?.finish,
-    art: n?.art,
-    accent: String(n?.accent || "").toLowerCase()
+    arts: nailArtsOf(n).map(a => ({ id: a?.id, color: String(a?.color || "").toLowerCase(), ...artPlaceOf(a) }))
   }));
-  const valid = nails.every(n => HEX_COLOR.test(n.color) && HEX_COLOR.test(n.accent)
-    && hasOption(nailOptions.finishes, n.finish) && hasOption(nailOptions.arts, n.art));
+  // Each piece of art can go on a nail once, so a nail never holds more than the whole art list.
+  const valid = nails.every(n => HEX_COLOR.test(n.color) && hasOption(nailOptions.finishes, n.finish)
+    && n.arts.every(a => a.id !== "none" && hasOption(nailOptions.arts, a.id) && HEX_COLOR.test(a.color) && placeOk(a))
+    && new Set(n.arts.map(a => a.id)).size === n.arts.length);
   return valid ? { shape: input.shape, length: input.length, nails } : null;
 }
 
@@ -368,7 +404,7 @@ function setAvatarPhoto(userId, filename) {
 
 function currentUser(req) {
   if (!req.session.userId) return null;
-  return db.prepare("SELECT id, username, mc, lc, hand_tone, avatar_emoji, avatar_bg, avatar_path, theme FROM users WHERE id = ?").get(req.session.userId) || null;
+  return db.prepare("SELECT id, username, mc, lc, hand_tone, avatar_emoji, avatar_bg, avatar_path, theme, zone_theme, adult_verified_at, adult_on FROM users WHERE id = ?").get(req.session.userId) || null;
 }
 function requireAuth(req, res, next) {
   if (!currentUser(req)) return res.status(401).json({ error: "Please sign in first." });
@@ -382,7 +418,8 @@ function avatarOf(row) {
 const MAX_ACCOUNTS = 10 ** 13;
 const accountNumber = id => String(id - 1).padStart(13, "0");
 function publicUser(row) {
-  return row ? { id: row.id, accountNumber: accountNumber(row.id), username: row.username, mc: row.mc, lc: row.lc, handTone: row.hand_tone, avatar: avatarOf(row), theme: row.theme } : null;
+  return row ? { id: row.id, accountNumber: accountNumber(row.id), username: row.username, mc: row.mc, lc: row.lc, handTone: row.hand_tone, avatar: avatarOf(row), theme: row.adult_on ? row.zone_theme : row.theme,
+    adult: { verified: Boolean(row.adult_verified_at), on: Boolean(row.adult_on) } } : null;
 }
 function ownsItem(userId, itemId) {
   return Boolean(db.prepare("SELECT 1 FROM inventory WHERE user_id=? AND item_id=?").get(userId, itemId));
@@ -390,6 +427,23 @@ function ownsItem(userId, itemId) {
 function areFriends(a, b) {
   return Boolean(db.prepare(`SELECT 1 FROM friendships WHERE status='accepted'
     AND ((requester_id=? AND addressee_id=?) OR (requester_id=? AND addressee_id=?))`).get(a, b, b, a));
+}
+// ---- 18+ zone ----
+// Someone is 18+ once they've confirmed it, entered the code sent to their email and passed the face scan. Turning 18+ on
+// puts them in the 18+ zone: they only see posts and groups made there, they can only talk to people who are 18+, and
+// nobody outside the zone sees any of it.
+const adultRow = userId => db.prepare("SELECT adult_verified_at AS verifiedAt, adult_on AS zone FROM users WHERE id=?").get(userId || 0);
+const isAdult = userId => Boolean(adultRow(userId)?.verifiedAt);
+const inZone = userId => Boolean(adultRow(userId)?.zone);
+// Two people can talk unless one of them is in the 18+ zone; then both have to be 18+.
+const canTalk = (a, b) => (!inZone(a) && !inZone(b)) || (isAdult(a) && isAdult(b));
+const talkError = me => inZone(me) ? "You're in the 18+ zone, so you can only talk to people who are 18+." : "They're in the 18+ zone right now, so you can't talk to them.";
+// 18+ groups are only for people in the zone, and people in the zone can only use 18+ groups.
+// Says what's wrong (and the status to answer with) when someone can't use a group from where they are.
+function groupZoneError(userId, group) {
+  if (group.adult && !inZone(userId)) return { status: 404, error: "That group doesn't exist any more." };
+  if (!group.adult && inZone(userId)) return { status: 403, error: "You're in the 18+ zone. Turn off 18+ in Settings to visit this group." };
+  return null;
 }
 // The AI assistant in Friends. It has its own chat with each person, where it sends tips (like how to afford something in the Shop).
 const AI = { userId: 0, username: "AI", avatar: { emoji: "🤖", bg: "sky", photoUrl: null } };
@@ -410,7 +464,8 @@ function friendsPayload(userId) {
   const rows = db.prepare(`
     SELECT f.id, f.status, f.requester_id AS requesterId, f.created_at AS createdAt,
       u.id AS userId, u.username, u.hand_tone AS handTone, u.avatar_emoji, u.avatar_bg, u.avatar_path,
-      (SELECT COUNT(*) FROM messages d WHERE d.sender_id=u.id AND d.recipient_id=? AND d.read_at IS NULL AND d.deleted_at IS NULL) AS unread
+      (SELECT COUNT(*) FROM messages d WHERE d.sender_id=u.id AND d.recipient_id=? AND d.read_at IS NULL AND d.deleted_at IS NULL) AS unread,
+      u.adult_verified_at, u.adult_on
     FROM friendships f
     JOIN users u ON u.id = CASE WHEN f.requester_id=? THEN f.addressee_id ELSE f.requester_id END
     WHERE f.requester_id=? OR f.addressee_id=?
@@ -418,9 +473,10 @@ function friendsPayload(userId) {
   `).all(userId, userId, userId, userId);
   const pending = rows.filter(r => r.status === "pending");
   const request = r => ({ requestId: r.id, userId: r.userId, username: r.username, avatar: avatarOf(r), createdAt: r.createdAt });
+  const me = adultRow(userId), talks = r => (!me?.zone && !r.adult_on) || Boolean(me?.verifiedAt && r.adult_verified_at);
   return {
     ai: { ...AI, unread: db.prepare("SELECT COUNT(*) AS n FROM ai_messages WHERE user_id=? AND read_at IS NULL").get(userId).n },
-    friends: rows.filter(r => r.status === "accepted").map(r => ({ id: r.userId, username: r.username, handTone: r.handTone, avatar: avatarOf(r), unread: r.unread })),
+    friends: rows.filter(r => r.status === "accepted").map(r => ({ id: r.userId, username: r.username, handTone: r.handTone, avatar: avatarOf(r), unread: r.unread, canTalk: talks(r) })),
     incoming: pending.filter(r => r.requesterId !== userId).map(request),
     outgoing: pending.filter(r => r.requesterId === userId).map(request),
     blocked: db.prepare(`SELECT u.id, u.username, u.avatar_emoji, u.avatar_bg, u.avatar_path FROM blocks b JOIN users u ON u.id=b.blocked_id
@@ -433,7 +489,7 @@ function receivedDesigns(userId) {
     FROM nail_designs d JOIN users u ON u.id=d.artist_id
     WHERE d.client_id=? AND NOT EXISTS(SELECT 1 FROM blocks b WHERE b.blocker_id=d.client_id AND b.blocked_id=d.artist_id)
     ORDER BY d.id DESC LIMIT 12
-  `).all(userId).map(d => ({ ...d, design: JSON.parse(d.design) }));
+  `).all(userId).map(d => ({ ...d, design: upgradeDesign(JSON.parse(d.design)) }));
 }
 // Pass onlyId (a regular group's number) to build just that group's card.
 function groupsPayload(viewerId, onlyId) {
@@ -442,8 +498,8 @@ function groupsPayload(viewerId, onlyId) {
       (SELECT COUNT(*) FROM group_members m WHERE m.group_id=g.id) AS members,
       EXISTS(SELECT 1 FROM group_members m WHERE m.group_id=g.id AND m.user_id=?) AS joined
     FROM community_groups g JOIN users u ON u.id=g.owner_id
-    ${onlyId ? "WHERE g.id=?" : ""} ORDER BY members DESC, g.id DESC LIMIT 200
-  `).all(viewerId || 0, ...(onlyId ? [onlyId] : []));
+    WHERE ${onlyId ? "g.id=?" : "g.adult=?"} ORDER BY members DESC, g.id DESC LIMIT 200
+  `).all(viewerId || 0, onlyId || (inZone(viewerId) ? 1 : 0));
   // The first few members of each group, for the little row of faces on its card.
   const faces = {};
   for (const f of db.prepare(`
@@ -453,7 +509,7 @@ function groupsPayload(viewerId, onlyId) {
       FROM group_members m JOIN users u ON u.id=m.user_id
     ) WHERE n <= 5
   `).all()) (faces[f.group_id] ||= []).push({ username: f.username, avatar: avatarOf(f) });
-  const secret = onlyId ? [] : secretGroups.map(g => secretGroupCard(viewerId, g));
+  const secret = onlyId || inZone(viewerId) ? [] : secretGroups.map(g => secretGroupCard(viewerId, g));
   return { groups: [...secret, ...groups.map(g => ({ ...g, joined: Boolean(g.joined), faces: faces[g.id] || [] }))], icons: groupIcons };
 }
 function secretGroupCard(viewerId, g) {
@@ -470,8 +526,8 @@ function secretGroupCard(viewerId, g) {
 function findGroup(key) {
   const secret = secretGroups.find(g => g.id === key);
   if (secret) return { key: secret.id, secret };
-  const id = Number(key), row = Number.isSafeInteger(id) && db.prepare("SELECT id FROM community_groups WHERE id=?").get(id);
-  return row ? { key: String(row.id), id: row.id } : null;
+  const id = Number(key), row = Number.isSafeInteger(id) && db.prepare("SELECT id, adult FROM community_groups WHERE id=?").get(id);
+  return row ? { key: String(row.id), id: row.id, adult: Boolean(row.adult) } : null;
 }
 function isGroupMember(userId, group) {
   return Boolean(group.secret
@@ -483,6 +539,8 @@ const groupCard = (viewerId, group) => group.secret ? secretGroupCard(viewerId, 
 function memberGroup(req, res) {
   const group = findGroup(req.params.id);
   if (!group) { res.status(404).json({ error: "That group doesn't exist any more." }); return null; }
+  const zone = groupZoneError(req.session.userId, group);
+  if (zone) { res.status(zone.status).json({ error: zone.error }); return null; }
   if (!isGroupMember(req.session.userId, group)) { res.status(403).json({ error: "Join the group first to see its posts and chat." }); return null; }
   return group;
 }
@@ -509,6 +567,7 @@ const MAX_REACTIONS = 20;
 function chatFriend(req, res) {
   const friendId = Number(req.params.userId);
   if (!Number.isSafeInteger(friendId) || !areFriends(req.session.userId, friendId)) { res.status(403).json({ error: "You can only chat with your friends." }); return null; }
+  if (!canTalk(req.session.userId, friendId)) { res.status(403).json({ error: talkError(req.session.userId) }); return null; }
   return friendId;
 }
 // A chat is a group's chat or a chat between two friends; `where` picks its messages.
@@ -570,7 +629,7 @@ function selectPosts(viewerId, where, params, order = "DESC", limit = 100) {
 }
 // The newest 100 posts on the main feed (or in a group), hiding people the viewer blocked.
 function postRows(viewerId, groupKey = null) {
-  return selectPosts(viewerId, "p.group_key IS ? AND NOT EXISTS(SELECT 1 FROM blocks b WHERE b.blocker_id=? AND b.blocked_id=p.user_id)", [groupKey, viewerId || 0]);
+  return selectPosts(viewerId, "p.group_key IS ? AND p.adult=? AND NOT EXISTS(SELECT 1 FROM blocks b WHERE b.blocker_id=? AND b.blocked_id=p.user_id)", [groupKey, inZone(viewerId) ? 1 : 0, viewerId || 0]);
 }
 function apiError(err, _req, res, _next) {
   if (err instanceof multer.MulterError) {
@@ -639,12 +698,12 @@ app.get("/api/posts", (req, res) => res.json({ posts: postRows(currentUser(req)?
 // Your own feed posts for your profile, newest or oldest first, a page at a time. `after` is the last post id already shown.
 const MY_POSTS_PAGE = 12;
 app.get("/api/me/posts", requireAuth, (req, res) => {
-  const me = req.session.userId, oldest = req.query.order === "oldest", after = Number(req.query.after);
+  const me = req.session.userId, oldest = req.query.order === "oldest", after = Number(req.query.after), adult = inZone(me) ? 1 : 0;
   const from = Number.isSafeInteger(after) && after > 0 ? ` AND p.id ${oldest ? ">" : "<"} ?` : "";
-  const posts = selectPosts(me, `p.user_id=? AND p.group_key IS NULL${from}`, from ? [me, after] : [me], oldest ? "ASC" : "DESC", MY_POSTS_PAGE + 1);
+  const posts = selectPosts(me, `p.user_id=? AND p.group_key IS NULL AND p.adult=?${from}`, from ? [me, adult, after] : [me, adult], oldest ? "ASC" : "DESC", MY_POSTS_PAGE + 1);
   res.json({
     posts: posts.slice(0, MY_POSTS_PAGE), more: posts.length > MY_POSTS_PAGE,
-    total: db.prepare("SELECT COUNT(*) AS n FROM posts WHERE user_id=? AND group_key IS NULL").get(me).n
+    total: db.prepare("SELECT COUNT(*) AS n FROM posts WHERE user_id=? AND group_key IS NULL AND adult=?").get(me, adult).n
   });
 });
 
@@ -659,8 +718,8 @@ function createPost(req, res, next, groupKey) {
         return res.status(400).json({ error: "Add a caption before posting." });
       }
       const type = req.file ? req.file.mimetype : null;
-      const result = db.prepare("INSERT INTO posts(user_id,caption,media_path,media_type,group_key) VALUES(?,?,?,?,?)")
-        .run(req.session.userId, caption, req.file ? path.basename(req.file.filename) : null, type, groupKey);
+      const result = db.prepare("INSERT INTO posts(user_id,caption,media_path,media_type,group_key,adult) VALUES(?,?,?,?,?,?)")
+        .run(req.session.userId, caption, req.file ? path.basename(req.file.filename) : null, type, groupKey, inZone(req.session.userId) ? 1 : 0);
       res.status(201).json({ postId: Number(result.lastInsertRowid), posts: postRows(req.session.userId, groupKey) });
     } catch (e) { next(e); }
   });
@@ -668,8 +727,8 @@ function createPost(req, res, next, groupKey) {
 app.post("/api/posts", requireAuth, (req, res, next) => createPost(req, res, next, null));
 
 const likeTransaction = db.transaction((userId, postId) => {
-  const post = db.prepare("SELECT id,user_id,group_key AS groupKey FROM posts WHERE id=?").get(postId);
-  if (!post) return { error: "Post not found.", status: 404 };
+  const post = db.prepare("SELECT id,user_id,group_key AS groupKey,adult FROM posts WHERE id=?").get(postId);
+  if (!post || Boolean(post.adult) !== inZone(userId)) return { error: "Post not found.", status: 404 };
   if (post.groupKey) {
     const group = findGroup(post.groupKey);
     if (!group || !isGroupMember(userId, group)) return { error: "Join the group first to like its posts.", status: 403 };
@@ -722,7 +781,7 @@ app.post("/api/shop/:itemId/buy", requireAuth, (req, res) => {
     db.prepare("INSERT INTO inventory(user_id,item_id) VALUES(?,?)").run(req.session.userId, p.id);
     // A newly bought theme goes on straight away.
     const theme = themes.find(t => t.item === p.id);
-    if (theme) db.prepare("UPDATE users SET theme=? WHERE id=?").run(theme.id, req.session.userId);
+    if (theme) setTheme(req.session.userId, theme.id);
     return { ok: true };
   });
   const result = tx();
@@ -730,12 +789,114 @@ app.post("/api/shop/:itemId/buy", requireAuth, (req, res) => {
   res.json({ user: publicUser(currentUser(req)), inventory: inventoryOf(req.session.userId) });
 });
 
+// Choosing a theme in the 18+ zone sets the zone's theme; anywhere else, your normal one.
+const setTheme = (userId, themeId) => db.prepare(`UPDATE users SET ${inZone(userId) ? "zone_theme" : "theme"}=? WHERE id=?`).run(themeId, userId);
 app.put("/api/me/theme", requireAuth, (req, res) => {
   const theme = themes.find(t => t.id === req.body.theme);
   if (!theme) return res.status(400).json({ error: "Choose one of the themes." });
-  if (theme.item && !ownsItem(req.session.userId, theme.item)) return res.status(403).json({ error: `Buy the ${theme.name} theme in the Shop first.` });
-  db.prepare("UPDATE users SET theme=? WHERE id=?").run(theme.id, req.session.userId);
+  if (theme.item && !ownsItem(req.session.userId, theme.item)) return res.status(403).json({ error: theme.gift ? "You don't have that theme." : `Buy the ${theme.name} theme in the Shop first.` });
+  setTheme(req.session.userId, theme.id);
   res.json({ user: publicUser(currentUser(req)) });
+});
+
+// Turning on 18+ takes four steps: confirm you're 18+, give an email, enter the code sent to it, then pass a face scan.
+// The face scan runs in the browser and only sends the age it guessed. Guesses can be a few years off, so it has to
+// guess at least ADULT_FACE_AGE. Once all four are done you're 18+ for good, and can turn the zone on and off any time.
+const ADULT_FACE_AGE = 21;
+const ADULT_CODE_MINUTES = 10, ADULT_CODE_TRIES = 5;
+const adultLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 15, standardHeaders: true, legacyHeaders: false, message: { error: "Too many tries. Please wait 15 minutes and try again." } });
+// The 18+ codes are emailed over SMTP; see email.js for the settings. Without a password, a copy of Yakimma running on
+// your own computer shows the code on screen instead, and the live site says email isn't set up.
+const mail = mailSettings(), mailer = createMailer(mail);
+// Sign in to the email server once at start, so the log says straight away whether 18+ codes can be emailed.
+if (mailer && !mail.from.includes("@")) console.error(`Email: codes would come from "${mail.from}", which isn't an email address. Set MAIL_FROM to the address they should come from.`);
+if (mailer) mailer.verify().then(
+  () => console.log(`Email: signed in to ${mail.host}. 18+ codes are emailed from ${mail.from}.`),
+  err => console.error(`Email: couldn't sign in to ${mail.host} (${err.message}). Check the SMTP settings. 18+ codes can't be emailed.`));
+else console.log("Email: no SMTP_PASS yet, so 18+ codes are shown on screen instead of emailed.");
+const hashCode = code => crypto.createHash("sha256").update(code).digest();
+
+app.post("/api/adult/email", requireAuth, adultLimiter, async (req, res, next) => {
+  const me = req.session.userId, email = String(req.body.email || "").trim().slice(0, 254);
+  if (req.body.confirm !== true) return res.status(400).json({ error: "Confirm you are 18+ first." });
+  if (isAdult(me)) return res.status(400).json({ error: "You've already done the 18+ checks." });
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: "Type your whole email address, like name@example.com." });
+  if (!mailer && isProduction) return res.status(503).json({ error: "Yakimma can't send emails yet, so 18+ can't be turned on right now." });
+  const code = String(crypto.randomInt(0, 1000000)).padStart(6, "0");
+  db.prepare(`INSERT INTO adult_checks(user_id,email,code_hash,expires_at) VALUES(?,?,?,?)
+    ON CONFLICT(user_id) DO UPDATE SET email=excluded.email, code_hash=excluded.code_hash, expires_at=excluded.expires_at, tries=0, email_ok=0`)
+    .run(me, email, hashCode(code).toString("hex"), Date.now() + ADULT_CODE_MINUTES * 60 * 1000);
+  if (!mailer) return res.json({ sent: false, testCode: code });
+  try {
+    const sent = await mailer.sendMail({
+      from: { name: "Yakimma", address: mail.from }, to: email, subject: "Your Yakimma 18+ code",
+      text: `Your Yakimma 18+ code is ${code}\n\nIt works for ${ADULT_CODE_MINUTES} minutes. If you didn't ask for this code, you can ignore this email.`
+    });
+    // The email server's reply has an id you can look up in cPanel's Track Delivery if the email doesn't arrive.
+    console.log(`Email: 18+ code handed to ${mail.host} (${sent.response})`);
+  } catch (err) {
+    db.prepare("DELETE FROM adult_checks WHERE user_id=?").run(me);
+    console.error("18+ code email failed:", err.message);
+    return res.status(502).json({ error: "That email couldn't be sent. Check the address and try again." });
+  }
+  res.json({ sent: true });
+});
+
+app.post("/api/adult/code", requireAuth, adultLimiter, (req, res) => {
+  const me = req.session.userId, check = db.prepare("SELECT * FROM adult_checks WHERE user_id=?").get(me);
+  if (!check) return res.status(400).json({ error: "Ask for a code first." });
+  if (check.expires_at < Date.now() || check.tries >= ADULT_CODE_TRIES) return res.status(400).json({ error: "That code has run out. Go back and ask for a new one." });
+  const given = hashCode(String(req.body.code || "").replace(/\D/g, "")), wanted = Buffer.from(check.code_hash, "hex");
+  if (!crypto.timingSafeEqual(given, wanted)) {
+    db.prepare("UPDATE adult_checks SET tries=tries+1 WHERE user_id=?").run(me);
+    return res.status(400).json({ error: "That code isn't right. Check your email and try again." });
+  }
+  db.prepare("UPDATE adult_checks SET email_ok=1 WHERE user_id=?").run(me);
+  res.json({ ok: true });
+});
+
+app.post("/api/adult/face", requireAuth, adultLimiter, (req, res) => {
+  const me = req.session.userId, check = db.prepare("SELECT email_ok FROM adult_checks WHERE user_id=?").get(me), age = Number(req.body.age);
+  if (!check?.email_ok) return res.status(400).json({ error: "Enter the code from your email first." });
+  if (!Number.isFinite(age)) return res.status(400).json({ error: "The face scan didn't finish. Try again." });
+  if (age < ADULT_FACE_AGE) return res.status(403).json({ error: "The face scan couldn't tell that you're 18+, so 18+ stays off." });
+  const gift = passAdultChecks(me);
+  res.json({ user: publicUser(currentUser(req)), gift });
+});
+// The last check is done: they're 18+, and in the zone. The email was only needed for the code, so it isn't kept.
+// Says whether they just got the Blood theme.
+const passAdultChecks = db.transaction(userId => {
+  db.prepare("UPDATE users SET adult_verified_at=CURRENT_TIMESTAMP, adult_on=1 WHERE id=?").run(userId);
+  db.prepare("DELETE FROM adult_checks WHERE user_id=?").run(userId);
+  return giveBloodTheme(userId);
+});
+// Entering the 18+ zone gives you the Blood theme for free. Says whether you just got it.
+const giveBloodTheme = userId => db.prepare("INSERT OR IGNORE INTO inventory(user_id,item_id) VALUES(?,'blood-theme')").run(userId).changes > 0;
+
+// Only on Yakimma running on your own computer (localhost), these accounts can skip the face scan by typing their
+// username and password. It never works on the live site, or from another device on your network. Write names in small letters.
+const FACE_SCAN_SKIPPERS = ["bleh", "manhatukfayay"];
+const fromThisComputer = req => !isProduction && ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.socket.remoteAddress);
+app.post("/api/adult/face-skip", requireAuth, adultLimiter, async (req, res, next) => {
+  try {
+    if (!fromThisComputer(req)) return res.status(404).json({ error: "Skipping the face scan only works on Yakimma running on your own computer." });
+    const me = currentUser(req), check = db.prepare("SELECT email_ok FROM adult_checks WHERE user_id=?").get(me.id);
+    if (!check?.email_ok) return res.status(400).json({ error: "Enter the code from your email first." });
+    if (String(req.body.username || "").trim().toLowerCase() !== me.username.toLowerCase()) return res.status(403).json({ error: "Type the username you're signed in with." });
+    if (!FACE_SCAN_SKIPPERS.includes(me.username.toLowerCase())) return res.status(403).json({ error: "This account can't skip the face scan." });
+    const { password_hash: hash } = db.prepare("SELECT password_hash FROM users WHERE id=?").get(me.id);
+    if (!await bcrypt.compare(String(req.body.password || ""), hash)) return res.status(403).json({ error: "That password isn't right." });
+    const gift = passAdultChecks(me.id);
+    res.json({ user: publicUser(currentUser(req)), gift });
+  } catch (err) { next(err); }
+});
+
+// Turn the 18+ zone on (only once you're 18+) or off.
+app.put("/api/adult", requireAuth, (req, res) => {
+  const me = req.session.userId, on = req.body.on === true;
+  if (on && !isAdult(me)) return res.status(403).json({ error: "Do the 18+ checks first." });
+  db.prepare("UPDATE users SET adult_on=? WHERE id=?").run(on ? 1 : 0, me);
+  res.json({ user: publicUser(currentUser(req)), gift: on && giveBloodTheme(me) });
 });
 
 app.get("/api/codes", requireAuth, (req, res) => res.json(codesPayload(req.session.userId)));
@@ -771,7 +932,7 @@ app.post("/api/groups", requireAuth, groupLimiter, (req, res, next) => {
   let groupId;
   try {
     db.transaction(() => {
-      groupId = Number(db.prepare("INSERT INTO community_groups(name,description,icon,owner_id) VALUES(?,?,?,?)").run(name, description, icon, me).lastInsertRowid);
+      groupId = Number(db.prepare("INSERT INTO community_groups(name,description,icon,owner_id,adult) VALUES(?,?,?,?,?)").run(name, description, icon, me, inZone(me) ? 1 : 0).lastInsertRowid);
       db.prepare("INSERT INTO group_members(group_id,user_id) VALUES(?,?)").run(groupId, me);
     })();
   } catch (err) {
@@ -782,6 +943,8 @@ app.post("/api/groups", requireAuth, groupLimiter, (req, res, next) => {
 });
 
 app.post("/api/groups/:id/join", requireAuth, (req, res) => {
+  const found = findGroup(req.params.id), zone = found && groupZoneError(req.session.userId, found);
+  if (zone) return res.status(zone.status).json({ error: zone.error });
   const secret = secretGroups.find(g => g.id === req.params.id);
   if (secret) {
     if (!secretGroupUnlocked(req.session.userId, secret.id)) return res.status(403).json({ error: `${secret.name} is a secret group. Enter its code on the Codes page to get in.` });
@@ -827,7 +990,9 @@ app.delete("/api/groups/:id", requireAuth, (req, res) => {
 app.get("/api/groups/:id", (req, res) => {
   const group = findGroup(req.params.id);
   if (!group) return res.status(404).json({ error: "That group doesn't exist any more." });
-  const me = currentUser(req)?.id, card = groupCard(me, group);
+  const me = currentUser(req)?.id, zone = groupZoneError(me, group);
+  if (zone) return res.status(zone.status).json({ error: zone.error });
+  const card = groupCard(me, group);
   if (!me || !isGroupMember(me, group)) return res.json({ group: card, posts: [], chat: { messages: [], rev: 0 } });
   res.json({ group: card, posts: postRows(me, group.key), chat: chatMessages(me, groupChatFor(group, me)) });
 });
@@ -836,6 +1001,8 @@ app.get("/api/groups/:id", (req, res) => {
 app.get("/api/groups/:id/members", requireAuth, (req, res) => {
   const group = findGroup(req.params.id);
   if (!group) return res.status(404).json({ error: "That group doesn't exist any more." });
+  const zone = groupZoneError(req.session.userId, group);
+  if (zone) return res.status(zone.status).json({ error: zone.error });
   // Secret groups have no owner.
   const info = group.secret || db.prepare("SELECT name, icon, owner_id AS ownerId FROM community_groups WHERE id=?").get(group.id), ownerId = info.ownerId || 0;
   const [table, key] = group.secret ? ["secret_group_members", group.key] : ["group_members", group.id];
@@ -862,6 +1029,7 @@ app.post("/api/friends/request", requireAuth, friendLimiter, (req, res) => {
   const other = db.prepare("SELECT id FROM users WHERE username = ? COLLATE NOCASE").get(String(req.body.username || "").trim());
   if (!other) return res.status(404).json({ error: "No Yakimma account has that username." });
   if (other.id === me) return res.status(400).json({ error: "You can't add yourself as a friend." });
+  if (inZone(me) && !isAdult(other.id)) return res.status(403).json({ error: "You're in the 18+ zone, so you can only add people who are 18+." });
   if (db.prepare("SELECT 1 FROM blocks WHERE blocker_id=? AND blocked_id=?").get(me, other.id)) return res.status(400).json({ error: "You blocked this person. Unblock them on the Friends page first." });
   if (db.prepare("SELECT 1 FROM blocks WHERE blocker_id=? AND blocked_id=?").get(other.id, me)) return res.status(403).json({ error: "You can't send a friend request to this person." });
   const tx = db.transaction(() => {
@@ -981,11 +1149,12 @@ for (const [base, chatOf] of [["/api/groups/:id/messages", groupChatOf], ["/api/
     let to;
     if (req.body.toGroup != null) {
       const group = findGroup(String(req.body.toGroup));
-      if (!group || !isGroupMember(me, group)) return res.status(403).json({ error: "You can only forward to groups you're in." });
+      if (!group || !isGroupMember(me, group) || groupZoneError(me, group)) return res.status(403).json({ error: "You can only forward to groups you're in." });
       to = groupChatFor(group, me);
     } else {
       const friendId = Number(req.body.toFriend);
       if (!Number.isSafeInteger(friendId) || !areFriends(me, friendId)) return res.status(403).json({ error: "You can only forward to your friends." });
+      if (!canTalk(me, friendId)) return res.status(403).json({ error: talkError(me) });
       to = friendChatFor(me, friendId);
     }
     insertMessage(to, me, msg.body, 1);
@@ -1053,9 +1222,10 @@ app.post("/api/nails", requireAuth, (req, res) => {
   if (!ownsItem(me, "nails")) return res.status(403).json({ error: "Unlock Nails in the Shop first." });
   // You can do your own nails, or a friend's.
   if (friendId !== me && (!Number.isSafeInteger(friendId) || !areFriends(me, friendId))) return res.status(403).json({ error: "You can only do nails for yourself or your friends." });
+  if (friendId !== me && !canTalk(me, friendId)) return res.status(403).json({ error: talkError(me) });
   const design = cleanDesign(req.body.design);
   if (!design) return res.status(400).json({ error: "That nail design isn't valid." });
-  const locked = design.nails.map(n => nailOptions.arts.find(a => a.id === n.art)).find(a => a.item && !ownsItem(me, a.item));
+  const locked = design.nails.flatMap(n => n.arts).map(a => nailOptions.arts.find(o => o.id === a.id)).find(a => a.item && !ownsItem(me, a.item));
   if (locked) return res.status(403).json({ error: `You need the ${locked.name} sticker to use it. Find its secret code!` });
   const result = db.prepare("INSERT INTO nail_designs(artist_id,client_id,design) VALUES(?,?,?)").run(me, friendId, JSON.stringify(design));
   res.status(201).json({ designId: Number(result.lastInsertRowid) });
@@ -1094,6 +1264,11 @@ app.delete("/api/pictures/:id", requireAuth, (req, res) => {
 
 // The library the 📷 camera uses to draw the page into a picture. The browser only loads it the first time you take one.
 app.get("/vendor/modern-screenshot.js", (_req, res) => res.sendFile(path.join(__dirname, "node_modules", "modern-screenshot", "dist", "index.js")));
+// The 18+ face scan's library and its two models (finding a face, and guessing its age). It all runs in the browser.
+const FACE_DIR = path.join(__dirname, "node_modules", "@vladmandic", "face-api");
+const FACE_MODELS = new Set(["tiny_face_detector_model-weights_manifest.json", "tiny_face_detector_model.bin", "age_gender_model-weights_manifest.json", "age_gender_model.bin"]);
+app.get("/vendor/face-api.js", (_req, res) => res.sendFile(path.join(FACE_DIR, "dist", "face-api.js")));
+app.get("/vendor/face-model/:file", (req, res) => FACE_MODELS.has(req.params.file) ? res.sendFile(path.join(FACE_DIR, "model", req.params.file)) : res.sendStatus(404));
 
 app.get("/uploads/:filename", (req, res) => {
   const filename = path.basename(req.params.filename);

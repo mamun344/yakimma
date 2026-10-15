@@ -23,7 +23,8 @@ This is a runnable first backend/frontend starter—not a published website yet.
 - **Chats** check for new messages every 3 seconds while open. Messages can be up to 500 characters, and sending more than 30 a minute means a short wait.
 - **Message actions:** tap a message to react with any of 1,898 emojis (Unicode Emoji 15.1, from `public/emoji-data.json`), forward it to a friend or group, or edit or delete your own. Deleted messages show as "This message was deleted". The person who made a group can delete anyone's messages in it. Emojis use the device's own emoji font, so they're Apple emojis on iPhone, iPad and Mac.
 - **Blocking:** block someone from a chat message, a post, a friend request or your friends list. You won't see their messages or posts, they can't send you friend requests, and any friendship ends. Unblock them in the Blocked list on the Friends page.
-- **Nail Salon:** locked until you buy Nails (1 LC). Pick your hand's skin tone, then choose a friend and give them a manicure: shape, length, polish colour, finish (glossy, matte, shimmer, chrome) and nail art per nail. Finished sets are saved and show on the friend's profile.
+- **Nail Salon:** locked until you buy Nails (1 LC). Pick your hand's skin tone, then choose a friend and give them a manicure: shape, length, polish colour, finish (glossy, matte, shimmer, chrome) and as much nail art per nail as you like. Each piece has its own colour, and you can drag it around on a big close-up of the nail, or size it, turn it and move it with sliders. Polish and art colours can be picked from a colour wheel too. Finished sets are saved and show on the friend's profile.
+- **18+ zone:** in Settings, **Turn on 18+?** takes four steps: confirm you're 18+, enter your email, type the code sent to it, and pass a face scan. In the zone the site turns dark and scary, and you only see 18+ posts and groups. You can only chat with people who are 18+, and nobody outside the zone sees any of it. **Kuchisake-onna** takes the place of Nails, and the 👹 button at the top turns the scary sounds off. Make her scream 5 times and Hachishakusama, a very tall woman in a white hat, starts stalking you around the zone with warnings and a quiet "po… po… po…". To make her leave, turn 18+ off and take 3 photos of nails with 📷 on the normal site. Entering the zone gives you the 🩸 Blood theme for free. The zone has its own theme (Blood to start with), which you can change in Settings, and turning 18+ off brings back your normal theme. Turn 18+ off in Settings to go back. On Yakimma running on your own computer (localhost), the accounts Bleh and Manhatukfayay can skip the face scan by typing its username and password. The list of accounts is `FACE_SCAN_SKIPPERS` in `server.js`, and skipping never works on the live site.
 - Responsive layout with the sidebar sections, and Mahdiya Faiza Manha's name at the top of the home page.
 
 ## Before you run it
@@ -48,6 +49,7 @@ The codes live in `server.js`, so anyone who can read the source code can see th
 1. Push this folder to a GitHub or GitLab repository.
 2. In Render, choose **New → Blueprint** and pick the repository.
 3. Approve the plan. Render creates the service and disk, and generates `SESSION_SECRET` for you.
+4. For the 18+ zone, the codes are emailed over SMTP. In the service's **Environment** tab, add `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER` and `SMTP_PASS`. For a cPanel email account, cPanel lists them under **Email Accounts → Connect Devices**: the outgoing server, port 465, the whole email address, and its password. Codes are sent from `SMTP_USER`, or from `MAIL_FROM` if you set it. Without these settings, nobody can turn on 18+ on the live site. On your own computer, run `npm run email-setup` to save them in the `.env` file (it's never committed) and check they work. Until they're filled in, the code is shown on screen.
 
 A disk needs a paid instance (Starter or higher). It also limits the service to one instance, and each deploy has a few seconds of downtime. Logins are kept in memory, so everyone is signed out whenever the service restarts.
 
@@ -62,7 +64,7 @@ This is a **local MVP**, not a deployed social network. SQLite and local upload 
 3. A strong `SESSION_SECRET` environment variable and HTTPS.
 4. Production session storage (not Express's default in-memory store).
 5. Upload quotas, video transcoding, moderation/reporting, blocking, deletion, backup and recovery.
-6. Age-appropriate privacy/safety policies and legal review, especially because social platforms can attract young users.
+6. Age-appropriate privacy/safety policies and legal review, especially because social platforms can attract young users. The 18+ face scan only estimates age from the camera in the browser. It can be off by years, a photo of a grown-up can fool it, and someone who knows how could skip it. A real age check needs a proper age-verification service.
 7. Friend-request safety: blocking, reporting, and notifications. Friends and the Nail Salon work, but pages refresh when you open them rather than updating live.
 8. Real viewing controls. Speed/effects should apply to the actual video player; the initial UI includes speed control and simple viewing effects.
 
