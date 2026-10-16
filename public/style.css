@@ -232,3 +232,23 @@ a.link-button{display:inline-block;border-radius:14px;padding:10px 14px;font-wei
 .hachi.below{top:auto;bottom:0;height:130vh;animation:hachiBelow 5.6s ease-in-out both}@keyframes hachiBelow{0%,100%{transform:translate(-50%,100%)}25%,75%{transform:translate(-50%,76%)}}
 .hachi.far{top:auto;bottom:4vh;height:48vh;filter:blur(.6px) brightness(.75);animation:hachiFar 5.6s ease-in-out both}@keyframes hachiFar{0%,100%{opacity:0;transform:translateX(-50%)}30%,70%{opacity:.6;transform:translateX(-50%)}}
 @media(prefers-reduced-motion:reduce){.hachi.below{animation:hachiFade 5.6s both;transform:translate(-50%,76%)}}
+/* Learn! 📚 */
+.learn-subjects{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px}.learn-subject{display:flex;flex-direction:column;align-items:center;gap:6px;padding:18px 12px;background:var(--surface2);color:var(--ink);border:2px solid var(--line);text-align:center}.learn-subject small{color:var(--muted);font-weight:700;line-height:1.35}.learn-icon{font-size:2.4rem}
+.grade-list{display:flex;flex-direction:column;gap:8px;max-width:320px}.grade-list button{text-align:left}
+.learn-question{font-size:1.25rem;font-weight:800;line-height:1.45;margin:14px 0}.learn-choices{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.learn-choice{background:var(--surface2);color:var(--ink);border:2px solid var(--line);padding:14px;text-align:left;font-size:1.02rem}.learn-choice:disabled{opacity:.6}.learn-choice.right{opacity:1;background:var(--teal2);color:var(--accent-ink);border-color:var(--teal)}.learn-choice.wrong{opacity:1;background:var(--danger-bg);color:var(--danger-ink);border-color:var(--danger-ink)}.learn-feedback{font-weight:800}.learn-score{font-size:1.5rem;font-weight:900;margin:10px 0}
+@media(max-width:700px){.learn-choices{grid-template-columns:1fr}}
+/* Reports 🚩 (admins only) */
+.report-reasons{margin:0 0 12px;padding-left:20px;line-height:1.6}.report .post{box-shadow:none}
+/* The Reports page has its own big Delete and Keep buttons under each post. */
+.report .post :is([data-delete-post],[data-report-post],[data-like]){display:none}
+.learn-clock{display:block;width:min(220px,70vw);margin:0 auto 14px}.learn-clock .face{fill:var(--surface);stroke:var(--ink);stroke-width:3}.learn-clock .tick{stroke:var(--muted);stroke-width:1}.learn-clock .tick.five{stroke:var(--ink);stroke-width:2}.learn-clock text{font-size:11px;font-weight:800;fill:var(--ink);text-anchor:middle;dominant-baseline:central}.learn-clock .hour{stroke:var(--ink);stroke-width:5;stroke-linecap:round}.learn-clock .minute{stroke:var(--accent-ink);stroke-width:3;stroke-linecap:round}.learn-clock .pin{fill:var(--ink)}
+[data-username-mode] small{display:block;color:var(--muted);font-weight:700;margin-top:2px}
+/* 🎵 Songs in Settings */
+.song-list{display:flex;flex-direction:column;gap:8px;max-width:440px}.song{display:flex;justify-content:space-between;align-items:center;gap:10px;background:var(--surface2);color:var(--ink);border:2px solid var(--line);text-align:left}.song.on{background:var(--pink2);color:var(--nav-ink);border-color:var(--pink)}.song small{color:var(--muted);font-weight:700}
+.menu-note{margin:6px 4px 2px;font-size:.82rem;color:var(--muted);line-height:1.4}
+.pill-btn{cursor:pointer;color:var(--ink)}.pill-btn:hover{background:var(--surface2)}
+/* Posts: who posted it (opens their profile), the description box, and who can see it */
+.post-author{display:flex;align-items:center;gap:10px;padding:0;background:none;color:inherit;text-align:left;font-weight:inherit;border-radius:12px}button.post-author:hover{transform:none}button.post-author:hover strong{text-decoration:underline}.post-author small{color:var(--muted)}
+.post-desc{background:var(--surface2);border-radius:12px;padding:10px 12px;white-space:pre-wrap;line-height:1.5;overflow-wrap:anywhere;margin-top:-4px}.post-desc.clamped{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.link-btn{background:none;padding:4px 2px;color:var(--accent-ink);font-weight:800}.link-btn:hover{transform:none;text-decoration:underline}
+.visibility{border:1px solid var(--line);border-radius:14px;padding:8px 12px 12px;margin:12px 0 0}.visibility legend{font-weight:750;font-size:.9rem;padding:0 4px}.vis-option{display:flex;gap:10px;align-items:flex-start;margin:8px 0 0;font-weight:400;cursor:pointer}.vis-option input{width:auto;margin-top:3px}.vis-option span{display:flex;flex-direction:column}.vis-option small{color:var(--muted)}
+.post-code{margin:10px 0 0;font-size:.8rem;color:var(--muted)}.post-code code{font-family:ui-monospace,Menlo,monospace;font-size:.85rem;color:var(--ink);background:var(--surface2);padding:2px 6px;border-radius:6px;user-select:all}

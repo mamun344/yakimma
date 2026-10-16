@@ -169,6 +169,53 @@ CREATE TABLE IF NOT EXISTS adult_checks (
   tries INTEGER NOT NULL DEFAULT 0,
   email_ok INTEGER NOT NULL DEFAULT 0
 );
+-- A parent part-way through setting up the kiddy zone (or a new parent password): where their code went, the code
+-- (hashed), and whether they've entered it.
+CREATE TABLE IF NOT EXISTS kid_checks (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  email TEXT NOT NULL,
+  code_hash TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  tries INTEGER NOT NULL DEFAULT 0,
+  email_ok INTEGER NOT NULL DEFAULT 0
+);
+-- Learn! 📚: the class (1 to 9) and region a parent chose for each subject.
+-- Learn! 📚: faith subjects (Islam, Christianity) a parent has verified for the child.
+CREATE TABLE IF NOT EXISTS learn_verified (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  subject TEXT NOT NULL,
+  PRIMARY KEY(user_id, subject)
+);
+CREATE TABLE IF NOT EXISTS learn_levels (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  subject TEXT NOT NULL,
+  grade INTEGER NOT NULL,
+  region TEXT NOT NULL,
+  PRIMARY KEY(user_id, subject)
+);
+-- Someone reporting a post they think is bad. Yakimma's admins see reported posts on the Reports page.
+CREATE TABLE IF NOT EXISTS post_reports (
+  post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+  reporter_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  reason TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(post_id, reporter_id)
+);
+-- Posts someone put in the playlist on their Profile, because they like them or want to see them later.
+CREATE TABLE IF NOT EXISTS playlist (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(user_id, post_id)
+);
+-- Following someone: one way, no request needed.
+CREATE TABLE IF NOT EXISTS follows (
+  follower_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  followee_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(follower_id, followee_id),
+  CHECK(follower_id <> followee_id)
+);
 CREATE TABLE IF NOT EXISTS code_redemptions (
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   code TEXT NOT NULL,
@@ -188,7 +235,24 @@ for (const [name, definition] of [
   ["adult_verified_at", "TEXT"],
   ["adult_on", "INTEGER NOT NULL DEFAULT 0"],
   // The 18+ zone has its own theme (Blood to start with), so leaving the zone brings back your normal one.
-  ["zone_theme", "TEXT NOT NULL DEFAULT 'blood'"]
+  ["zone_theme", "TEXT NOT NULL DEFAULT 'blood'"],
+  // The kiddy zone (see below): the parent's email and parent-only password once a parent has set it up, and whether
+  // the account is in the kiddy zone right now.
+  ["kid_email", "TEXT"],
+  ["kid_pass_hash", "TEXT"],
+  // The parent's face, so only they can sign out of the kiddy zone. It's kept as numbers (see sameFace), never as a picture.
+  ["kid_face", "TEXT"],
+  ["kid_on", "INTEGER NOT NULL DEFAULT 0"],
+  // Whether a parent verified the account for Learn's Islam subject (older versions; it's in learn_verified now).
+  ["learn_muslim", "INTEGER NOT NULL DEFAULT 0"],
+  // The song picked in Settings (see SONGS).
+  ["song", "TEXT NOT NULL DEFAULT 'none'"],
+  // Chosen when making an account (see RELIGIONS and COUNTRIES), and shown on the profile for everyone to see.
+  ["religion", "TEXT"],
+  ["country", "TEXT"],
+  // The child's and the parent's birth dates (YYYY-MM-DD), filled in when a parent sets up the kiddy zone. Never shared.
+  ["kid_birth_date", "TEXT"],
+  ["parent_birth_date", "TEXT"]
 ]) {
   if (!userColumns.includes(name)) db.exec(`ALTER TABLE users ADD COLUMN ${name} ${definition}`);
 }
@@ -198,6 +262,38 @@ if (!db.prepare("PRAGMA table_info(posts)").all().some(c => c.name === "group_ke
 for (const table of ["posts", "community_groups"]) {
   if (!db.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === "adult")) db.exec(`ALTER TABLE ${table} ADD COLUMN adult INTEGER NOT NULL DEFAULT 0`);
 }
+// Posts made in the kiddy zone are marked kid, and only show there.
+if (!db.prepare("PRAGMA table_info(posts)").all().some(c => c.name === "kid")) db.exec("ALTER TABLE posts ADD COLUMN kid INTEGER NOT NULL DEFAULT 0");
+// Like YouTube, a post has a description under its caption, and who can see it: "public" (everyone, on the feed and the
+// person's profile), "unlisted" (only the person's friends on Yakimma) or "private" (only the person who posted it).
+// The person can change it any time.
+const postColumns = db.prepare("PRAGMA table_info(posts)").all().map(c => c.name);
+for (const [name, definition] of [["description", "TEXT NOT NULL DEFAULT ''"], ["visibility", "TEXT NOT NULL DEFAULT 'public'"]]) {
+  if (!postColumns.includes(name)) db.exec(`ALTER TABLE posts ADD COLUMN ${name} ${definition}`);
+}
+const VISIBILITIES = ["public", "unlisted", "private"], MAX_DESCRIPTION = 2000;
+// Every post has its own link, /post/<code>, with a random 13-character code of letters, numbers and symbols. Yakimma
+// picks it, never the person posting, and every code has at least one letter, one number and one symbol. The symbols
+// are ones that are safe in a link.
+const CODE_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", CODE_NUMBERS = "0123456789", CODE_SYMBOLS = "-_~", CODE_LENGTH = 13;
+function newPostCode() {
+  const any = CODE_LETTERS + CODE_NUMBERS + CODE_SYMBOLS, from = set => set[crypto.randomInt(set.length)];
+  for (;;) {
+    const chars = [from(CODE_LETTERS), from(CODE_NUMBERS), from(CODE_SYMBOLS), ...Array.from({ length: CODE_LENGTH - 3 }, () => from(any))];
+    for (let i = chars.length - 1; i > 0; i--) { const j = crypto.randomInt(i + 1); [chars[i], chars[j]] = [chars[j], chars[i]]; }
+    const code = chars.join("");
+    if (!db.prepare("SELECT 1 FROM posts WHERE code=?").get(code)) return code;
+  }
+}
+// Posts from before codes get one now.
+if (!postColumns.includes("code")) db.exec("ALTER TABLE posts ADD COLUMN code TEXT");
+for (const { id } of db.prepare("SELECT id FROM posts WHERE code IS NULL").all()) db.prepare("UPDATE posts SET code=? WHERE id=?").run(newPostCode(), id);
+db.exec("CREATE UNIQUE INDEX IF NOT EXISTS posts_code ON posts(code)");
+// For lists of posts: public ones, and unlisted ones by the viewer or the viewer's friends. Its 3 ?s are the viewer.
+const SEES_POST = `(p.visibility='public' OR (p.visibility='unlisted' AND (p.user_id=? OR EXISTS(SELECT 1 FROM friendships f WHERE f.status='accepted'
+  AND ((f.requester_id=p.user_id AND f.addressee_id=?) OR (f.addressee_id=p.user_id AND f.requester_id=?))))))`;
+// Whether someone can see one post: public, theirs, or unlisted by a friend.
+const seesPost = (viewerId, post) => post.visibility === "public" || post.userId === viewerId || (post.visibility === "unlisted" && areFriends(viewerId, post.userId));
 db.exec("CREATE INDEX IF NOT EXISTS posts_group ON posts(group_key, id)");
 db.exec("CREATE INDEX IF NOT EXISTS posts_user ON posts(user_id, id)");
 // Chats used to be kept in two tables. Move any old messages into `messages` once, then remove the old tables.
@@ -332,18 +428,59 @@ function cleanDesign(input) {
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.json({ limit: "100kb" }));
 app.use(express.urlencoded({ extended: false, limit: "100kb" }));
+// Sign-ins are kept in the database, so they survive the server restarting (and new versions going live), and each
+// visit keeps you signed in for another SESSION_DAYS, so refreshing or coming back to Yakimma never signs you out.
+const SESSION_DAYS = 365, DAY = 24 * 60 * 60 * 1000;
+db.exec("CREATE TABLE IF NOT EXISTS sessions (sid TEXT PRIMARY KEY, data TEXT NOT NULL, expires INTEGER NOT NULL)");
+const sessionExpiry = sess => new Date(sess.cookie?.expires || Date.now() + SESSION_DAYS * DAY).getTime();
+class DatabaseSessionStore extends session.Store {
+  get(sid, done) {
+    try {
+      const row = db.prepare("SELECT data, expires FROM sessions WHERE sid=?").get(sid);
+      done(null, row && row.expires > Date.now() ? JSON.parse(row.data) : null);
+    } catch (err) { done(err); }
+  }
+  set(sid, sess, done) {
+    try {
+      db.prepare("INSERT INTO sessions(sid,data,expires) VALUES(?,?,?) ON CONFLICT(sid) DO UPDATE SET data=excluded.data, expires=excluded.expires")
+        .run(sid, JSON.stringify(sess), sessionExpiry(sess));
+      done?.();
+    } catch (err) { done?.(err); }
+  }
+  touch(sid, sess, done) {
+    try { db.prepare("UPDATE sessions SET expires=? WHERE sid=?").run(sessionExpiry(sess), sid); done?.(); } catch (err) { done?.(err); }
+  }
+  destroy(sid, done) {
+    try { db.prepare("DELETE FROM sessions WHERE sid=?").run(sid); done?.(); } catch (err) { done?.(err); }
+  }
+}
+// Sign-ins nobody has used for SESSION_DAYS are cleared out once a day.
+setInterval(() => db.prepare("DELETE FROM sessions WHERE expires < ?").run(Date.now()), DAY).unref();
 app.use(session({
   name: "yakimma.sid",
   secret: SESSION_SECRET || "local-development-only-change-before-launch",
+  store: new DatabaseSessionStore(),
   resave: false,
   saveUninitialized: false,
+  rolling: true,
   cookie: {
     httpOnly: true,
     sameSite: "lax",
     secure: isProduction,
-    maxAge: 1000 * 60 * 60 * 24 * 7
+    maxAge: SESSION_DAYS * DAY
   }
 }));
+
+// Only faces that don't match count, so nobody can keep trying faces until one gets through.
+const kidFaceLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, skipSuccessfulRequests: true, standardHeaders: true, legacyHeaders: false, message: { error: "Too many face scans that didn't match. Please wait 15 minutes and try again." } });
+// A face from the face scan is 128 numbers that describe it. Two scans are the same person when their numbers are
+// close: the face scan's own guide says under 0.6, and KID_FACE_MATCH is a bit stricter.
+const KID_FACE_MATCH = 0.5;
+const cleanFace = face => Array.isArray(face) && face.length === 128 && face.every(Number.isFinite) ? face.map(Number) : null;
+const sameFace = (a, b) => Math.hypot(...a.map((x, i) => x - b[i])) < KID_FACE_MATCH;
+// The kiddy zone only has Feed, Profile, Settings, Friends, Nails, Learn and the Shop, so groups, codes, pictures and
+// the Reports page are closed in it.
+app.use(/^\/api\/(groups|codes|pictures|reports)(\/|$)/, (req, res, next) => inKidZone(req.session.userId) ? res.status(403).json({ error: "That isn't in the kiddy zone." }) : next());
 
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false });
 const friendLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 40, standardHeaders: true, legacyHeaders: false, message: { error: "Too many friend requests. Please wait a little while." } });
@@ -404,22 +541,34 @@ function setAvatarPhoto(userId, filename) {
 
 function currentUser(req) {
   if (!req.session.userId) return null;
-  return db.prepare("SELECT id, username, mc, lc, hand_tone, avatar_emoji, avatar_bg, avatar_path, theme, zone_theme, adult_verified_at, adult_on FROM users WHERE id = ?").get(req.session.userId) || null;
+  // Only whether the kiddy zone birth dates are filled in. The dates themselves are never sent anywhere.
+  return db.prepare(`SELECT id, username, mc, lc, hand_tone, avatar_emoji, avatar_bg, avatar_path, theme, zone_theme, adult_verified_at, adult_on, kid_pass_hash, kid_face, kid_on, song, religion, country,
+    (kid_birth_date IS NOT NULL AND parent_birth_date IS NOT NULL) AS kid_birth_dates FROM users WHERE id = ?`).get(req.session.userId) || null;
 }
 function requireAuth(req, res, next) {
   if (!currentUser(req)) return res.status(401).json({ error: "Please sign in first." });
   next();
 }
+// Admins' profile picture is always 🛠️, which proves they're admins. Nobody else can pick it (it isn't in avatarOptions).
+const ADMIN_EMOJI = "🛠️";
 function avatarOf(row) {
+  if (ADMINS.includes(row.username?.toLowerCase())) return { emoji: ADMIN_EMOJI, bg: row.avatar_bg, photoUrl: null };
   return { emoji: row.avatar_emoji, bg: row.avatar_bg, photoUrl: row.avatar_path ? `/uploads/${encodeURIComponent(row.avatar_path)}` : null };
 }
 // Every account has its own 13-digit number, in sign-up order: the first is 0000000000000, the next 0000000000001,
 // and so on up to 9999999999999. Account ids start at 1 and are never reused, so the number is the id minus one.
 const MAX_ACCOUNTS = 10 ** 13;
 const accountNumber = id => String(id - 1).padStart(13, "0");
+// Yakimma's admins: they can delete anyone's posts, groups and group chat messages, and they see the Reports page.
+// So they can check how things look, they can also switch into the 18+ zone or the kiddy zone (and out again) without
+// the checks, the parent password or the parent's face. Write names in small letters.
+const ADMINS = ["bleh", "manhatukfayay"];
+const isAdmin = userId => ADMINS.includes(db.prepare("SELECT username FROM users WHERE id=?").get(userId || 0)?.username.toLowerCase());
 function publicUser(row) {
-  return row ? { id: row.id, accountNumber: accountNumber(row.id), username: row.username, mc: row.mc, lc: row.lc, handTone: row.hand_tone, avatar: avatarOf(row), theme: row.adult_on ? row.zone_theme : row.theme,
-    adult: { verified: Boolean(row.adult_verified_at), on: Boolean(row.adult_on) } } : null;
+  return row ? { id: row.id, accountNumber: accountNumber(row.id), username: row.username, mc: row.mc, lc: row.lc, handTone: row.hand_tone, avatar: avatarOf(row), theme: row.adult_on ? row.zone_theme : row.theme, song: row.song, admin: ADMINS.includes(row.username.toLowerCase()),
+    religion: row.religion, country: row.country,
+    adult: { verified: Boolean(row.adult_verified_at), on: Boolean(row.adult_on) },
+    kid: { ready: Boolean(row.kid_pass_hash), face: Boolean(row.kid_face), on: Boolean(row.kid_on), birthDates: Boolean(row.kid_birth_dates) } } : null;
 }
 function ownsItem(userId, itemId) {
   return Boolean(db.prepare("SELECT 1 FROM inventory WHERE user_id=? AND item_id=?").get(userId, itemId));
@@ -435,12 +584,25 @@ function areFriends(a, b) {
 const adultRow = userId => db.prepare("SELECT adult_verified_at AS verifiedAt, adult_on AS zone FROM users WHERE id=?").get(userId || 0);
 const isAdult = userId => Boolean(adultRow(userId)?.verifiedAt);
 const inZone = userId => Boolean(adultRow(userId)?.zone);
-// Two people can talk unless one of them is in the 18+ zone; then both have to be 18+.
-const canTalk = (a, b) => (!inZone(a) && !inZone(b)) || (isAdult(a) && isAdult(b));
-const talkError = me => inZone(me) ? "You're in the 18+ zone, so you can only talk to people who are 18+." : "They're in the 18+ zone right now, so you can't talk to them.";
-// 18+ groups are only for people in the zone, and people in the zone can only use 18+ groups.
+// ---- Kiddy zone 🧸 ----
+// A zone for kids that a parent turns on: they give their email, type the code sent to it, choose a parent-only
+// password, scan their face if they want, and fill in the child's and their own birth dates (kept private). In the zone a kid only sees posts made there, can only add and talk to friends who are
+// in it too, and only has Feed, Profile, Settings, Friends, Nails, Learn and the Shop. Only the parent password turns it off,
+// and only the parent's face can sign out.
+const kidRow = userId => db.prepare("SELECT kid_email AS email, kid_pass_hash AS passHash, kid_face AS face, kid_on AS zone FROM users WHERE id=?").get(userId || 0);
+const inKidZone = userId => Boolean(kidRow(userId)?.zone);
+// Which posts someone sees and makes: [adult, kid].
+const postZone = userId => [inZone(userId) ? 1 : 0, inKidZone(userId) ? 1 : 0];
+// Two people can talk unless one of them is in a zone: in the 18+ zone both have to be 18+, and in the kiddy zone
+// both have to be in it.
+const canTalk = (a, b) => inKidZone(a) || inKidZone(b) ? inKidZone(a) && inKidZone(b) : (!inZone(a) && !inZone(b)) || (isAdult(a) && isAdult(b));
+const talkError = (me, other) => inKidZone(me) ? "You're in the kiddy zone, so you can only talk to friends who are in it too."
+  : inKidZone(other) ? "They're in the kiddy zone right now, so you can't talk to them."
+  : inZone(me) ? "You're in the 18+ zone, so you can only talk to people who are 18+." : "They're in the 18+ zone right now, so you can't talk to them.";
+// 18+ groups are only for people in the zone, and people in the zone can only use 18+ groups. Groups aren't in the kiddy zone.
 // Says what's wrong (and the status to answer with) when someone can't use a group from where they are.
 function groupZoneError(userId, group) {
+  if (inKidZone(userId)) return { status: 403, error: "Groups aren't in the kiddy zone." };
   if (group.adult && !inZone(userId)) return { status: 404, error: "That group doesn't exist any more." };
   if (!group.adult && inZone(userId)) return { status: 403, error: "You're in the 18+ zone. Turn off 18+ in Settings to visit this group." };
   return null;
@@ -465,7 +627,7 @@ function friendsPayload(userId) {
     SELECT f.id, f.status, f.requester_id AS requesterId, f.created_at AS createdAt,
       u.id AS userId, u.username, u.hand_tone AS handTone, u.avatar_emoji, u.avatar_bg, u.avatar_path,
       (SELECT COUNT(*) FROM messages d WHERE d.sender_id=u.id AND d.recipient_id=? AND d.read_at IS NULL AND d.deleted_at IS NULL) AS unread,
-      u.adult_verified_at, u.adult_on
+      u.adult_verified_at, u.adult_on, u.kid_on
     FROM friendships f
     JOIN users u ON u.id = CASE WHEN f.requester_id=? THEN f.addressee_id ELSE f.requester_id END
     WHERE f.requester_id=? OR f.addressee_id=?
@@ -473,16 +635,22 @@ function friendsPayload(userId) {
   `).all(userId, userId, userId, userId);
   const pending = rows.filter(r => r.status === "pending");
   const request = r => ({ requestId: r.id, userId: r.userId, username: r.username, avatar: avatarOf(r), createdAt: r.createdAt });
-  const me = adultRow(userId), talks = r => (!me?.zone && !r.adult_on) || Boolean(me?.verifiedAt && r.adult_verified_at);
+  const me = adultRow(userId), kid = inKidZone(userId);
+  const talks = r => kid || r.kid_on ? Boolean(kid && r.kid_on) : (!me?.zone && !r.adult_on) || Boolean(me?.verifiedAt && r.adult_verified_at);
   return {
     ai: { ...AI, unread: db.prepare("SELECT COUNT(*) AS n FROM ai_messages WHERE user_id=? AND read_at IS NULL").get(userId).n },
     friends: rows.filter(r => r.status === "accepted").map(r => ({ id: r.userId, username: r.username, handTone: r.handTone, avatar: avatarOf(r), unread: r.unread, canTalk: talks(r) })),
     incoming: pending.filter(r => r.requesterId !== userId).map(request),
     outgoing: pending.filter(r => r.requesterId === userId).map(request),
     blocked: db.prepare(`SELECT u.id, u.username, u.avatar_emoji, u.avatar_bg, u.avatar_path FROM blocks b JOIN users u ON u.id=b.blocked_id
-      WHERE b.blocker_id=? ORDER BY u.username COLLATE NOCASE`).all(userId).map(r => ({ id: r.id, username: r.username, avatar: avatarOf(r) }))
+      WHERE b.blocker_id=? ORDER BY u.username COLLATE NOCASE`).all(userId).map(r => ({ id: r.id, username: r.username, avatar: avatarOf(r) })),
+    follows: followCounts(userId)
   };
 }
+const followCounts = userId => ({
+  followers: db.prepare("SELECT COUNT(*) AS n FROM follows WHERE followee_id=?").get(userId).n,
+  following: db.prepare("SELECT COUNT(*) AS n FROM follows WHERE follower_id=?").get(userId).n
+});
 function receivedDesigns(userId) {
   return db.prepare(`
     SELECT d.id, d.design, d.created_at AS createdAt, d.artist_id AS artistId, u.username AS artist
@@ -567,14 +735,14 @@ const MAX_REACTIONS = 20;
 function chatFriend(req, res) {
   const friendId = Number(req.params.userId);
   if (!Number.isSafeInteger(friendId) || !areFriends(req.session.userId, friendId)) { res.status(403).json({ error: "You can only chat with your friends." }); return null; }
-  if (!canTalk(req.session.userId, friendId)) { res.status(403).json({ error: talkError(req.session.userId) }); return null; }
+  if (!canTalk(req.session.userId, friendId)) { res.status(403).json({ error: talkError(req.session.userId, friendId) }); return null; }
   return friendId;
 }
 // A chat is a group's chat or a chat between two friends; `where` picks its messages.
 const groupChatFor = (group, userId) => ({
   where: "m.group_key=?", params: [group.key], groupKey: group.key,
   // The person who made a group can delete anyone's messages in it.
-  moderator: !group.secret && db.prepare("SELECT owner_id FROM community_groups WHERE id=?").get(group.id)?.owner_id === userId
+  moderator: (!group.secret && db.prepare("SELECT owner_id FROM community_groups WHERE id=?").get(group.id)?.owner_id === userId) || isAdmin(userId)
 });
 const friendChatFor = (me, friendId) => ({ where: "((m.sender_id=? AND m.recipient_id=?) OR (m.sender_id=? AND m.recipient_id=?))", params: [me, friendId, friendId, me], friendId });
 function groupChatOf(req, res) { const group = memberGroup(req, res); return group && groupChatFor(group, req.session.userId); }
@@ -614,22 +782,25 @@ const markRead = (me, chat) => { if (chat.friendId) db.prepare("UPDATE messages 
 // Posts as the browser shows them; `where` picks which ones, in id order ("DESC" is newest first).
 function selectPosts(viewerId, where, params, order = "DESC", limit = 100) {
   return db.prepare(`
-    SELECT p.id, p.user_id AS userId, u.username, p.caption, p.media_path AS mediaPath,
+    SELECT p.id, p.code, p.user_id AS userId, u.username, p.caption, p.description, p.visibility, p.group_key AS groupKey, p.media_path AS mediaPath,
       p.media_type AS mediaType, p.created_at AS createdAt, u.avatar_emoji, u.avatar_bg, u.avatar_path,
       (SELECT COUNT(*) FROM likes l WHERE l.post_id=p.id) AS likes,
-      EXISTS(SELECT 1 FROM likes l WHERE l.post_id=p.id AND l.user_id=?) AS liked
+      EXISTS(SELECT 1 FROM likes l WHERE l.post_id=p.id AND l.user_id=?) AS liked,
+      EXISTS(SELECT 1 FROM playlist s WHERE s.post_id=p.id AND s.user_id=?) AS inPlaylist
     FROM posts p JOIN users u ON u.id=p.user_id
     WHERE ${where}
     ORDER BY p.id ${order} LIMIT ?
-  `).all(viewerId || 0, ...params, limit).map(p => ({
-    id: p.id, userId: p.userId, username: p.username, avatar: avatarOf(p), caption: p.caption,
+  `).all(viewerId || 0, viewerId || 0, ...params, limit).map(p => ({
+    id: p.id, code: p.code, userId: p.userId, username: p.username, avatar: avatarOf(p), caption: p.caption, description: p.description, visibility: p.visibility, inGroup: Boolean(p.groupKey),
     mediaUrl: p.mediaPath ? `/uploads/${encodeURIComponent(p.mediaPath)}` : null,
-    mediaType: p.mediaType, createdAt: p.createdAt, likes: p.likes, liked: Boolean(p.liked)
+    mediaType: p.mediaType, createdAt: p.createdAt, likes: p.likes, liked: Boolean(p.liked), inPlaylist: Boolean(p.inPlaylist)
   }));
 }
-// The newest 100 posts on the main feed (or in a group), hiding people the viewer blocked.
+// The newest 100 posts on the main feed (or in a group) the viewer may see (public, or unlisted by them or a friend),
+// hiding people the viewer blocked.
 function postRows(viewerId, groupKey = null) {
-  return selectPosts(viewerId, "p.group_key IS ? AND p.adult=? AND NOT EXISTS(SELECT 1 FROM blocks b WHERE b.blocker_id=? AND b.blocked_id=p.user_id)", [groupKey, inZone(viewerId) ? 1 : 0, viewerId || 0]);
+  const v = viewerId || 0;
+  return selectPosts(viewerId, `p.group_key IS ? AND ${SEES_POST} AND p.adult=? AND p.kid=? AND NOT EXISTS(SELECT 1 FROM blocks b WHERE b.blocker_id=? AND b.blocked_id=p.user_id)`, [groupKey, v, v, v, ...postZone(viewerId), v]);
 }
 function apiError(err, _req, res, _next) {
   if (err instanceof multer.MulterError) {
@@ -641,34 +812,142 @@ function apiError(err, _req, res, _next) {
 
 app.get("/api/me", (req, res) => {
   const u = currentUser(req);
-  if (!u) return res.json({ user: null, products, themes, nailOptions, avatarOptions });
-  res.json({ user: publicUser(u), inventory: inventoryOf(u.id), products, themes, nailOptions, avatarOptions });
+  if (!u) return res.json({ user: null, products, themes, nailOptions, avatarOptions, reportReasons: REPORT_REASONS, religions: RELIGIONS, countries: COUNTRIES });
+  res.json({ user: publicUser(u), inventory: inventoryOf(u.id), products, themes, nailOptions, avatarOptions, reportReasons: REPORT_REASONS, religions: RELIGIONS, countries: COUNTRIES, learn: learnPayload(u.id), usernameCost: USERNAME_COST, songs: songsPayload(u.id) });
 });
 
+// ---- Religion and country ----
+// Everyone chooses both when they make an account (older accounts are asked once), and they show on their profile for
+// everyone to see. Only people whose religion is Islam can open Learn's Islam subject, and only Muslims from Bangladesh
+// can play the Quran Gojol song.
+const RELIGIONS = [
+  { id: "islam", name: "Islam", icon: "☪️" },
+  { id: "christianity", name: "Christianity", icon: "✝️" },
+  { id: "hinduism", name: "Hinduism", icon: "🕉️" },
+  { id: "buddhism", name: "Buddhism", icon: "☸️" },
+  { id: "judaism", name: "Judaism", icon: "✡️" },
+  { id: "sikhism", name: "Sikhism", icon: "☬" },
+  { id: "other", name: "Other religion", icon: "🙏" },
+  { id: "none", name: "No religion", icon: "🌱" }
+];
+// Every country by its two-letter code, with its English name and flag, in A to Z order.
+const COUNTRY_NAMES = new Intl.DisplayNames(["en"], { type: "region" }), COUNTRY_NAME_FIXES = { PS: "Palestine" };
+const COUNTRIES = `AD AE AF AG AI AL AM AO AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BW BY BZ CA CC CD CF
+  CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL
+  GM GN GP GQ GR GT GU GW GY HK HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI
+  LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM
+  PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD
+  TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG US UY UZ VA VC VE VG VI VN VU WF WS XK YE YT ZA ZM ZW`.split(/\s+/)
+  .map(code => ({ code, name: COUNTRY_NAME_FIXES[code] || COUNTRY_NAMES.of(code), flag: String.fromCodePoint(...[...code].map(c => 0x1F1A5 + c.charCodeAt(0))) }))
+  .sort((a, b) => a.name.localeCompare(b.name));
+// What's wrong with a chosen religion and country, if anything.
+const identityProblem = (religion, country) => !RELIGIONS.some(r => r.id === religion) ? "Choose your religion."
+  : !COUNTRIES.some(c => c.code === country) ? "Choose your country." : null;
+const identityOf = userId => db.prepare("SELECT religion, country FROM users WHERE id=?").get(userId) || {};
+const isMuslim = userId => identityOf(userId).religion === "islam";
+// Accounts made before religion and country were asked for choose them once.
+app.put("/api/me/identity", requireAuth, (req, res) => {
+  const me = req.session.userId, { religion, country } = req.body;
+  const had = identityOf(me);
+  if (had.religion && had.country) return res.status(400).json({ error: "Your religion and country are already chosen." });
+  if (identityProblem(religion, country)) return res.status(400).json({ error: identityProblem(religion, country) });
+  db.prepare("UPDATE users SET religion=?, country=? WHERE id=?").run(religion, country, me);
+  res.json({ user: publicUser(currentUser(req)), songs: songsPayload(me) });
+});
+
+// What's wrong with a new username, if anything. Used when signing up and when changing your username.
+const usernameProblem = name => /\s/.test(name) ? "Do not use spaces. Usernames can only have letters and numbers."
+  : /[^A-Za-z0-9]/.test(name) ? "Do not use symbols. Usernames can only have letters and numbers."
+  : name.length < 3 || name.length > 20 ? "Username must be 3–20 letters or numbers." : null;
+const COPIED_USERNAME = "Do not copy usernames. Someone already has that username, and changing capital letters still counts as the same name.";
 app.post("/api/signup", authLimiter, async (req, res, next) => {
   try {
     const username = String(req.body.username || "").trim();
     const password = String(req.body.password || "");
-    if (/\s/.test(username)) return res.status(400).json({ error: "Do not use spaces. Usernames can only have letters and numbers." });
-    if (/[^A-Za-z0-9]/.test(username)) return res.status(400).json({ error: "Do not use symbols. Usernames can only have letters and numbers." });
-    if (username.length < 3 || username.length > 20) return res.status(400).json({ error: "Username must be 3–20 letters or numbers." });    // Passwords can have any letters, numbers, symbols or emojis, but no spaces.
+    if (usernameProblem(username)) return res.status(400).json({ error: usernameProblem(username) });    // Passwords can have any letters, numbers, symbols or emojis, but no spaces.
     if (/\s/.test(password)) return res.status(400).json({ error: "Do not use spaces in your password." });
     if (password.length < 8 || password.length > 200) return res.status(400).json({ error: "Password must be 8–200 characters." });
+    const { religion, country } = req.body;
+    if (identityProblem(religion, country)) return res.status(400).json({ error: identityProblem(religion, country) });
     const hash = await bcrypt.hash(password, 12);
     if ((db.prepare("SELECT seq FROM sqlite_sequence WHERE name='users'").get()?.seq || 0) >= MAX_ACCOUNTS) {
       return res.status(403).json({ error: "Yakimma is full: every account number has been given out." });
     }
     // Usernames are compared ignoring capitals (the column is COLLATE NOCASE), so "Cutie" and "cutie" are the same name.
-    const result = db.prepare("INSERT INTO users(username,password_hash,mc) VALUES(?,?,0)").run(username, hash);
+    const result = db.prepare("INSERT INTO users(username,password_hash,mc,religion,country) VALUES(?,?,0,?,?)").run(username, hash, religion, country);
     req.session.regenerate(err => {
       if (err) return next(err);
       req.session.userId = Number(result.lastInsertRowid);
       res.json({ user: publicUser(currentUser(req)), products });
     });
   } catch (err) {
-    if (String(err.code) === "SQLITE_CONSTRAINT_UNIQUE") return res.status(409).json({ error: "Do not copy usernames. Someone already has that username, and changing capital letters still counts as the same name." });
+    if (String(err.code) === "SQLITE_CONSTRAINT_UNIQUE") return res.status(409).json({ error: COPIED_USERNAME });
     next(err);
   }
+});
+
+// Songs to play while you use Yakimma, picked in Settings. Each one plays from public/songs/<file>, and one whose
+// file isn't there yet shows as "Not added yet". Songs marked `adult` only unlock once you've been in the 18+ zone
+// (passed the 18+ checks; admins can always use them), and they and songs marked `notKids` are locked in the kiddy
+// zone. Songs marked `bangladeshiMuslim` only unlock for people whose religion is Islam and whose country is Bangladesh.
+// Every other song plays in any zone. Songs marked `last` (Quran Gojol) always show at the bottom of the list, below
+// any songs added after them. To add a song, put its .mp3 in public/songs and add it here.
+const SONGS = [
+  { id: "none", name: "Default (No Song)" },
+  { id: "gnarlyyy", name: "Gnarlyyy", file: "gnarlyyy.mp3", adult: true },
+  { id: "gameboy", name: "GameBoy", file: "gameboy.mp3" },
+  { id: "dolly-babe", name: "Dolly Babe", file: "dolly-babe.mp3", adult: true },
+  { id: "i-know-you-belongg", name: "I Know You Belongg", file: "i-know-you-belongg.mp3", adult: true },
+  { id: "how-you-like-that", name: "How You Like That?", file: "how-you-like-that.mp3" },
+  { id: "quran-gojol", name: "Quran Gojol", file: "quran-gojol.mp3", bangladeshiMuslim: true, last: true },
+  { id: "love-funk", name: "Love Funk", file: "love-funk.mp3" },
+  { id: "thats-how-life-goes", name: "That's How Life Goes", file: "thats-how-life-goes.mp3" },
+  { id: "trending", name: "Trending", file: "trending.mp3" }
+].sort((a, b) => Boolean(a.last) - Boolean(b.last));
+// Each song with whether its file is there and why it's locked for this person, if it is: "adult" (not been in the
+// 18+ zone yet), "kids" (they're in the kiddy zone) or "bangladeshiMuslim" (their religion isn't Islam or their country
+// isn't Bangladesh).
+function songsPayload(userId) {
+  const grown = isAdult(userId) || isAdmin(userId), kid = inKidZone(userId), { religion, country } = identityOf(userId);
+  const bangladeshiMuslim = religion === "islam" && country === "BD";
+  return SONGS.map(s => ({ ...s, ready: !s.file || fs.existsSync(path.join(__dirname, "public", "songs", s.file)),
+    lock: s.adult && !grown ? "adult" : (s.adult || s.notKids) && kid ? "kids" : s.bangladeshiMuslim && !bangladeshiMuslim ? "bangladeshiMuslim" : null }));
+}
+app.put("/api/me/song", requireAuth, (req, res) => {
+  const song = songsPayload(req.session.userId).find(s => s.id === req.body.song);
+  if (!song) return res.status(400).json({ error: "There's no song like that." });
+  if (!song.ready) return res.status(400).json({ error: `${song.name} isn't added to Yakimma yet.` });
+  if (song.lock) return res.status(403).json({ error: { adult: `${song.name} unlocks once you've been in the 18+ zone.`, kids: `${song.name} isn't in the kiddy zone.`,
+    bangladeshiMuslim: `${song.name} is only for Muslims from Bangladesh.` }[song.lock] });
+  db.prepare("UPDATE users SET song=? WHERE id=?").run(song.id, req.session.userId);
+  res.json({ user: publicUser(currentUser(req)) });
+});
+
+// Changing your username on your Profile. Changing only capital letters (like "cutie" to "Cutie") is free; a whole new
+// username costs USERNAME_COST MC. Nobody can copy someone else's username. Admin powers come from the username, so
+// admins can only change their capital letters, and nobody else can take an admin's name.
+const USERNAME_COST = 50;
+app.put("/api/me/username", requireAuth, (req, res) => {
+  const me = currentUser(req), username = String(req.body.username || "").trim(), whole = req.body.whole === true;
+  if (usernameProblem(username)) return res.status(400).json({ error: usernameProblem(username) });
+  if (username === me.username) return res.status(400).json({ error: "That's already your username." });
+  const sameLetters = username.toLowerCase() === me.username.toLowerCase();
+  if (!whole && !sameLetters) return res.status(400).json({ error: "Here you can only change which letters are capitals. For new letters, use Change Whole Username." });
+  if (whole && sameLetters) return res.status(400).json({ error: "That only changes capital letters, which is free. Use Change Capitalization instead." });
+  if (whole && isAdmin(me.id)) return res.status(403).json({ error: "Admin usernames can only change their capital letters." });
+  const taken = [...ADMINS, ...FACE_SCAN_SKIPPERS].includes(username.toLowerCase()) || db.prepare("SELECT 1 FROM users WHERE username=? AND id<>?").get(username, me.id);
+  if (whole && taken) return res.status(409).json({ error: COPIED_USERNAME });
+  if (whole && me.mc < USERNAME_COST) return res.status(400).json({ error: `A whole new username costs ${USERNAME_COST} MC, and you have ${me.mc} MC.` });
+  try {
+    db.transaction(() => {
+      db.prepare("UPDATE users SET username=? WHERE id=?").run(username, me.id);
+      if (whole) db.prepare("UPDATE users SET mc=mc-? WHERE id=?").run(USERNAME_COST, me.id);
+    })();
+  } catch (err) {
+    if (String(err.code) === "SQLITE_CONSTRAINT_UNIQUE") return res.status(409).json({ error: COPIED_USERNAME });
+    throw err;
+  }
+  res.json({ user: publicUser(currentUser(req)) });
 });
 
 app.post("/api/login", authLimiter, async (req, res, next) => {
@@ -685,7 +964,19 @@ app.post("/api/login", authLimiter, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-app.post("/api/logout", (req, res, next) => {
+// In the kiddy zone only a parent (or an admin) can sign out: with the parent password, or a face scan that matches the
+// parent's saved face.
+app.post("/api/logout", kidFaceLimiter, async (req, res, next) => {
+  const me = req.session.userId, kid = kidRow(me);
+  if (kid?.zone && !isAdmin(me)) {
+    if (req.body.face !== undefined) {
+      const face = cleanFace(req.body.face);
+      if (!kid.face) return res.status(400).json({ error: "No parent face is saved yet, so use the parent password." });
+      if (!face || !sameFace(face, JSON.parse(kid.face))) return res.status(403).json({ error: "That isn't the parent's face, so you can't sign out of the kiddy zone." });
+    } else {
+      try { if (!await parentPasswordOk(me, req.body.password)) return wrongParentPassword(res); } catch (err) { return next(err); }
+    }
+  }
   req.session.destroy(err => {
     if (err) return next(err);
     res.clearCookie("yakimma.sid", { httpOnly: true, sameSite: "lax", secure: isProduction });
@@ -698,12 +989,12 @@ app.get("/api/posts", (req, res) => res.json({ posts: postRows(currentUser(req)?
 // Your own feed posts for your profile, newest or oldest first, a page at a time. `after` is the last post id already shown.
 const MY_POSTS_PAGE = 12;
 app.get("/api/me/posts", requireAuth, (req, res) => {
-  const me = req.session.userId, oldest = req.query.order === "oldest", after = Number(req.query.after), adult = inZone(me) ? 1 : 0;
+  const me = req.session.userId, oldest = req.query.order === "oldest", after = Number(req.query.after), zone = postZone(me);
   const from = Number.isSafeInteger(after) && after > 0 ? ` AND p.id ${oldest ? ">" : "<"} ?` : "";
-  const posts = selectPosts(me, `p.user_id=? AND p.group_key IS NULL AND p.adult=?${from}`, from ? [me, adult, after] : [me, adult], oldest ? "ASC" : "DESC", MY_POSTS_PAGE + 1);
+  const posts = selectPosts(me, `p.user_id=? AND p.group_key IS NULL AND p.adult=? AND p.kid=?${from}`, from ? [me, ...zone, after] : [me, ...zone], oldest ? "ASC" : "DESC", MY_POSTS_PAGE + 1);
   res.json({
     posts: posts.slice(0, MY_POSTS_PAGE), more: posts.length > MY_POSTS_PAGE,
-    total: db.prepare("SELECT COUNT(*) AS n FROM posts WHERE user_id=? AND group_key IS NULL AND adult=?").get(me, adult).n
+    total: db.prepare("SELECT COUNT(*) AS n FROM posts WHERE user_id=? AND group_key IS NULL AND adult=? AND kid=?").get(me, ...zone).n
   });
 });
 
@@ -712,23 +1003,90 @@ function createPost(req, res, next, groupKey) {
   upload.single("media")(req, res, err => {
     if (err) return apiError(err, req, res, next);
     try {
-      const caption = String(req.body.caption || "").trim().slice(0, 240);
+      const caption = String(req.body.caption || "").trim().slice(0, 240), description = String(req.body.description || "").trim().slice(0, MAX_DESCRIPTION);
+      // Group posts are always public to the group.
+      const visibility = !groupKey && VISIBILITIES.includes(req.body.visibility) ? req.body.visibility : "public";
       if (!caption) {
         if (req.file) fs.unlink(req.file.path, () => {});
         return res.status(400).json({ error: "Add a caption before posting." });
       }
       const type = req.file ? req.file.mimetype : null;
-      const result = db.prepare("INSERT INTO posts(user_id,caption,media_path,media_type,group_key,adult) VALUES(?,?,?,?,?,?)")
-        .run(req.session.userId, caption, req.file ? path.basename(req.file.filename) : null, type, groupKey, inZone(req.session.userId) ? 1 : 0);
-      res.status(201).json({ postId: Number(result.lastInsertRowid), posts: postRows(req.session.userId, groupKey) });
+      const code = newPostCode();
+      const result = db.prepare("INSERT INTO posts(user_id,code,caption,description,visibility,media_path,media_type,group_key,adult,kid) VALUES(?,?,?,?,?,?,?,?,?,?)")
+        .run(req.session.userId, code, caption, description, visibility, req.file ? path.basename(req.file.filename) : null, type, groupKey, ...postZone(req.session.userId));
+      res.status(201).json({ postId: Number(result.lastInsertRowid), code, posts: postRows(req.session.userId, groupKey) });
     } catch (e) { next(e); }
   });
 }
 app.post("/api/posts", requireAuth, (req, res, next) => createPost(req, res, next, null));
 
+// One post, for its link (/post/<code>): public posts for anyone who could see them from where they are, unlisted ones
+// only for the person's friends, and private ones only for the person who posted them. Older links used the post's number.
+app.get("/api/posts/:key", (req, res) => {
+  const me = currentUser(req)?.id || 0, key = String(req.params.key), byNumber = /^\d+$/.test(key);
+  const [post] = selectPosts(me, `${byNumber ? "p.id=?" : "p.code=?"} AND p.group_key IS NULL AND p.adult=? AND p.kid=?`, [byNumber ? Number(key) : key, ...postZone(me)], "DESC", 1);
+  const blocked = post && me && db.prepare("SELECT 1 FROM blocks WHERE (blocker_id=? AND blocked_id=?) OR (blocker_id=? AND blocked_id=?)").get(me, post.userId, post.userId, me);
+  if (!post || blocked || !seesPost(me, post)) return res.status(404).json({ error: "This post isn't available. It may be only for friends, private, or deleted." });
+  res.json({ post });
+});
+
+// Changing who can see your own post, any time. Group posts are always public to the group.
+app.put("/api/posts/:id/visibility", requireAuth, (req, res) => {
+  const me = req.session.userId, post = db.prepare("SELECT id, user_id, group_key FROM posts WHERE id=?").get(Number(req.params.id)), visibility = req.body.visibility;
+  if (!post || post.user_id !== me) return res.status(404).json({ error: "You can only change your own posts." });
+  if (post.group_key) return res.status(400).json({ error: "Group posts are always seen by the whole group." });
+  if (!VISIBILITIES.includes(visibility)) return res.status(400).json({ error: "Choose Public, Unlisted or Private." });
+  db.prepare("UPDATE posts SET visibility=? WHERE id=?").run(visibility, post.id);
+  res.json({ ok: true, visibility });
+});
+
+// You can delete your own posts (videos, photos and text). Admins can delete anyone's.
+app.delete("/api/posts/:id", requireAuth, (req, res) => {
+  const me = req.session.userId, post = db.prepare("SELECT id, user_id, media_path FROM posts WHERE id=?").get(Number(req.params.id));
+  if (!post) return res.status(404).json({ error: "That post is already gone." });
+  if (post.user_id !== me && !isAdmin(me)) return res.status(403).json({ error: "You can only delete your own posts." });
+  db.prepare("DELETE FROM posts WHERE id=?").run(post.id);
+  if (post.media_path) fs.unlink(path.join(uploadDir, path.basename(post.media_path)), () => {});
+  res.json({ ok: true });
+});
+
+// Reporting someone else's post. Each person can report a post once (reporting again changes the reason).
+const REPORT_REASONS = ["😠 Mean or bullying", "🧸 Not OK for kids", "📢 Spam", "❓ Something else"];
+const reportLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false, message: { error: "You're reporting a lot. Please wait a little while." } });
+app.post("/api/posts/:id/report", requireAuth, reportLimiter, (req, res) => {
+  const me = req.session.userId, post = db.prepare("SELECT id, user_id AS userId, user_id, adult, kid, visibility FROM posts WHERE id=?").get(Number(req.params.id)), [adult, kid] = postZone(me);
+  if (!post || post.adult !== adult || post.kid !== kid || !seesPost(me, post)) return res.status(404).json({ error: "Post not found." });
+  if (post.user_id === me) return res.status(400).json({ error: "You can't report your own post. You can delete it instead." });
+  if (!REPORT_REASONS.includes(req.body.reason)) return res.status(400).json({ error: "Choose why you're reporting it." });
+  db.prepare(`INSERT INTO post_reports(post_id,reporter_id,reason) VALUES(?,?,?)
+    ON CONFLICT(post_id,reporter_id) DO UPDATE SET reason=excluded.reason, created_at=CURRENT_TIMESTAMP`).run(post.id, me, req.body.reason);
+  res.json({ ok: true });
+});
+// The Reports page, for admins (it isn't in the kiddy zone): reported 18+ posts in the 18+ zone, and reported posts from
+// the normal site and the kiddy zone everywhere else, newest report first, with who reported them and why.
+function requireAdmin(req, res, next) {
+  if (!isAdmin(req.session.userId)) return res.status(403).json({ error: "Only Yakimma's admins can see reports." });
+  next();
+}
+function reportsPayload(userId) {
+  const reports = {};
+  for (const r of db.prepare(`SELECT r.post_id AS postId, r.reason, r.created_at AS createdAt, u.username, p.kid FROM post_reports r
+    JOIN users u ON u.id=r.reporter_id JOIN posts p ON p.id=r.post_id ORDER BY r.created_at DESC`).all()) (reports[r.postId] ||= []).push(r);
+  const posts = selectPosts(userId, "p.id IN (SELECT post_id FROM post_reports) AND p.adult=?", [inZone(userId) ? 1 : 0], "DESC", 200)
+    .map(p => ({ ...p, kid: Boolean(reports[p.id][0].kid), reports: reports[p.id].map(({ kid, ...r }) => r) }))
+    .sort((a, b) => b.reports[0].createdAt.localeCompare(a.reports[0].createdAt));
+  return { posts };
+}
+app.get("/api/reports", requireAuth, requireAdmin, (req, res) => res.json(reportsPayload(req.session.userId)));
+// Keeping a reported post: its reports are cleared.
+app.delete("/api/reports/:postId", requireAuth, requireAdmin, (req, res) => {
+  db.prepare("DELETE FROM post_reports WHERE post_id=?").run(Number(req.params.postId));
+  res.json(reportsPayload(req.session.userId));
+});
+
 const likeTransaction = db.transaction((userId, postId) => {
-  const post = db.prepare("SELECT id,user_id,group_key AS groupKey,adult FROM posts WHERE id=?").get(postId);
-  if (!post || Boolean(post.adult) !== inZone(userId)) return { error: "Post not found.", status: 404 };
+  const post = db.prepare("SELECT id,user_id,user_id AS userId,group_key AS groupKey,adult,kid,visibility FROM posts WHERE id=?").get(postId), [adult, kid] = postZone(userId);
+  if (!post || post.adult !== adult || post.kid !== kid || !seesPost(userId, post)) return { error: "Post not found.", status: 404 };
   if (post.groupKey) {
     const group = findGroup(post.groupKey);
     if (!group || !isGroupMember(userId, group)) return { error: "Join the group first to like its posts.", status: 403 };
@@ -750,6 +1108,39 @@ app.post("/api/posts/:id/like", requireAuth, (req, res) => {
   const result = likeTransaction(req.session.userId, postId);
   if (result.error) return res.status(result.status).json({ error: result.error });
   res.json({ ...result, posts: postRows(req.session.userId, result.groupKey), user: publicUser(currentUser(req)) });
+});
+
+// ---- Playlist 🎶 ----
+// Anyone signed in can put a post (theirs or someone else's) in the playlist on their Profile, to see it again later.
+// The playlist only shows posts they can still see from where they are, newest added first, so posts that were deleted,
+// made private, are from someone blocked, are in a group they left, or are from another zone drop out.
+function canOpenPost(userId, post) {
+  const [adult, kid] = postZone(userId);
+  if (post.adult !== adult || post.kid !== kid || !seesPost(userId, post)) return false;
+  if (db.prepare("SELECT 1 FROM blocks WHERE (blocker_id=? AND blocked_id=?) OR (blocker_id=? AND blocked_id=?)").get(userId, post.userId, post.userId, userId)) return false;
+  const group = post.groupKey && findGroup(post.groupKey);
+  return !post.groupKey || Boolean(group && isGroupMember(userId, group));
+}
+const PLAYLIST_LIMIT = 200;
+const playlistPost = id => db.prepare("SELECT id, user_id AS userId, visibility, group_key AS groupKey, adult, kid FROM posts WHERE id=?").get(id);
+function playlistPayload(userId) {
+  const ids = db.prepare(`SELECT p.id, p.user_id AS userId, p.visibility, p.group_key AS groupKey, p.adult, p.kid FROM playlist s JOIN posts p ON p.id=s.post_id
+    WHERE s.user_id=? ORDER BY s.created_at DESC, s.rowid DESC LIMIT ?`).all(userId, PLAYLIST_LIMIT).filter(p => canOpenPost(userId, p)).map(p => p.id);
+  if (!ids.length) return { posts: [] };
+  const posts = selectPosts(userId, `p.id IN (${ids.map(() => "?").join(",")})`, ids, "DESC", ids.length);
+  return { posts: ids.map(id => posts.find(p => p.id === id)).filter(Boolean) };
+}
+app.get("/api/me/playlist", requireAuth, (req, res) => res.json(playlistPayload(req.session.userId)));
+app.post("/api/posts/:id/playlist", requireAuth, (req, res) => {
+  const me = req.session.userId, post = playlistPost(Number(req.params.id));
+  if (!post || !canOpenPost(me, post)) return res.status(404).json({ error: "That post isn't available any more." });
+  if (db.prepare("SELECT COUNT(*) AS n FROM playlist WHERE user_id=?").get(me).n >= PLAYLIST_LIMIT) return res.status(400).json({ error: `Your playlist is full (${PLAYLIST_LIMIT} posts). Take some out first.` });
+  db.prepare("INSERT OR IGNORE INTO playlist(user_id,post_id) VALUES(?,?)").run(me, post.id);
+  res.json({ inPlaylist: true });
+});
+app.delete("/api/posts/:id/playlist", requireAuth, (req, res) => {
+  db.prepare("DELETE FROM playlist WHERE user_id=? AND post_id=?").run(req.session.userId, Number(req.params.id));
+  res.json({ inPlaylist: false });
 });
 
 app.post("/api/exchange", requireAuth, (req, res) => {
@@ -819,6 +1210,7 @@ const hashCode = code => crypto.createHash("sha256").update(code).digest();
 app.post("/api/adult/email", requireAuth, adultLimiter, async (req, res, next) => {
   const me = req.session.userId, email = String(req.body.email || "").trim().slice(0, 254);
   if (req.body.confirm !== true) return res.status(400).json({ error: "Confirm you are 18+ first." });
+  if (inKidZone(me)) return res.status(403).json({ error: "18+ isn't in the kiddy zone." });
   if (isAdult(me)) return res.status(400).json({ error: "You've already done the 18+ checks." });
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: "Type your whole email address, like name@example.com." });
   if (!mailer && isProduction) return res.status(503).json({ error: "Yakimma can't send emails yet, so 18+ can't be turned on right now." });
@@ -893,10 +1285,199 @@ app.post("/api/adult/face-skip", requireAuth, adultLimiter, async (req, res, nex
 
 // Turn the 18+ zone on (only once you're 18+) or off.
 app.put("/api/adult", requireAuth, (req, res) => {
-  const me = req.session.userId, on = req.body.on === true;
-  if (on && !isAdult(me)) return res.status(403).json({ error: "Do the 18+ checks first." });
+  const me = req.session.userId, on = req.body.on === true, admin = isAdmin(me);
+  if (on && !isAdult(me) && !admin) return res.status(403).json({ error: "Do the 18+ checks first." });
+  if (on && inKidZone(me) && !admin) return res.status(403).json({ error: "18+ isn't in the kiddy zone." });
   db.prepare("UPDATE users SET adult_on=? WHERE id=?").run(on ? 1 : 0, me);
+  // An admin can go straight from the kiddy zone to the 18+ zone.
+  if (on) db.prepare("UPDATE users SET kid_on=0 WHERE id=?").run(me);
   res.json({ user: publicUser(currentUser(req)), gift: on && giveBloodTheme(me) });
+});
+
+// A parent sets up the kiddy zone in three steps: their email, the code sent to it, then a parent-only password, which
+// puts the account in the zone. The parent's email is kept, so if they forget the password they can get a new code and
+// choose another one. Once a parent has set it up the code always goes to their email, never a new one.
+const KID_CODE_MINUTES = 10, KID_CODE_TRIES = 5, KID_PASSWORD_MIN = 6;
+const kidLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 15, standardHeaders: true, legacyHeaders: false, message: { error: "Too many tries. Please wait 15 minutes and try again." } });
+// Only wrong parent passwords count, so nobody can guess it by trying lots.
+const kidPasswordLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, skipSuccessfulRequests: true, standardHeaders: true, legacyHeaders: false, message: { error: "Too many wrong passwords. Please wait 15 minutes and try again." } });
+
+app.post("/api/kid/email", requireAuth, kidLimiter, async (req, res) => {
+  const me = req.session.userId, saved = kidRow(me).email, email = saved || String(req.body.email || "").trim().slice(0, 254);
+  if (inZone(me)) return res.status(403).json({ error: "Turn off 18+ first." });
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: "Type the parent's whole email address, like name@example.com." });
+  if (!mailer && isProduction) return res.status(503).json({ error: "Yakimma can't send emails yet, so the kiddy zone can't be set up right now." });
+  const code = String(crypto.randomInt(0, 1000000)).padStart(6, "0");
+  db.prepare(`INSERT INTO kid_checks(user_id,email,code_hash,expires_at) VALUES(?,?,?,?)
+    ON CONFLICT(user_id) DO UPDATE SET email=excluded.email, code_hash=excluded.code_hash, expires_at=excluded.expires_at, tries=0, email_ok=0`)
+    .run(me, email, hashCode(code).toString("hex"), Date.now() + KID_CODE_MINUTES * 60 * 1000);
+  if (!mailer) return res.json({ sent: false, testCode: code });
+  const why = saved ? `Someone asked for a new parent password for the kiddy zone on the Yakimma account ${currentUser(req).username}.`
+    : `The Yakimma account ${currentUser(req).username} wants to turn on the kiddy zone, a safe part of Yakimma for kids. Only a parent should do this.`;
+  try {
+    const sent = await mailer.sendMail({
+      from: { name: "Yakimma", address: mail.from }, to: email, subject: "Your Yakimma kiddy zone code",
+      text: `${why}\n\nYour parent code is ${code}\n\nType it on Yakimma, then choose a parent-only password. Only that password can turn the kiddy zone off. ` +
+        `The code works for ${KID_CODE_MINUTES} minutes. If you didn't ask for this code, you can ignore this email.`
+    });
+    console.log(`Email: kiddy zone code handed to ${mail.host} (${sent.response})`);
+  } catch (err) {
+    db.prepare("DELETE FROM kid_checks WHERE user_id=?").run(me);
+    console.error("Kiddy zone code email failed:", err.message);
+    return res.status(502).json({ error: "That email couldn't be sent. Check the address and try again." });
+  }
+  res.json({ sent: true });
+});
+
+app.post("/api/kid/code", requireAuth, kidLimiter, (req, res) => {
+  const me = req.session.userId, check = db.prepare("SELECT * FROM kid_checks WHERE user_id=?").get(me);
+  if (!check) return res.status(400).json({ error: "Ask for a code first." });
+  if (check.expires_at < Date.now() || check.tries >= KID_CODE_TRIES) return res.status(400).json({ error: "That code has run out. Go back and ask for a new one." });
+  const given = hashCode(String(req.body.code || "").replace(/\D/g, "")), wanted = Buffer.from(check.code_hash, "hex");
+  if (!crypto.timingSafeEqual(given, wanted)) {
+    db.prepare("UPDATE kid_checks SET tries=tries+1 WHERE user_id=?").run(me);
+    return res.status(400).json({ error: "That code isn't right. Check the parent's email and try again." });
+  }
+  db.prepare("UPDATE kid_checks SET email_ok=1 WHERE user_id=?").run(me);
+  res.json({ ok: true });
+});
+
+// The last steps: the parent chooses their password (or a new one), scans their face if they want, and fills in the
+// child's and their own birth dates, and the account goes into the kiddy zone. Choosing a new password keeps the face
+// and birth dates already saved (accounts set up before birth dates were asked for fill them in then too).
+app.post("/api/kid/password", requireAuth, kidLimiter, async (req, res, next) => {
+  try {
+    const me = req.session.userId, check = db.prepare("SELECT email, email_ok FROM kid_checks WHERE user_id=?").get(me), password = String(req.body.password || "");
+    if (!check?.email_ok) return res.status(400).json({ error: "Enter the code from the parent's email first." });
+    if (password.length < KID_PASSWORD_MIN || password.length > 200) return res.status(400).json({ error: `The parent password must be ${KID_PASSWORD_MIN}–200 characters.` });
+    // The parent's face is up to the parent: they can scan it now, skip it, or save it later in Settings.
+    const face = req.body.face === undefined ? null : parentFace(req.body);
+    if (face?.error) return res.status(400).json(face);
+    // The birth dates are needed unless they're already saved (a new password keeps them).
+    const born = hasBirthDates(me) ? null : birthDates(req.body);
+    if (born?.error) return res.status(400).json(born);
+    enterKidZone(me, { email: check.email, passHash: await bcrypt.hash(password, 12), face: face?.face, born });
+    res.json({ user: publicUser(currentUser(req)) });
+  } catch (err) { next(err); }
+});
+// The parent's face from a face scan, which has to look grown-up (like the 18+ face scan), or what's wrong with it.
+function parentFace({ face, age }) {
+  const clean = cleanFace(face);
+  if (!clean || !Number.isFinite(Number(age))) return { error: "The parent's face scan didn't finish. Try again." };
+  if (Number(age) < ADULT_FACE_AGE) return { error: "The face scan couldn't tell that this is a grown-up. A parent has to scan their own face." };
+  return { face: JSON.stringify(clean) };
+}
+// The child's and the parent's birth dates from the last setup step, or what's wrong with them. They're kept private:
+// they're never sent to anyone, not even back to the account itself.
+function birthDates({ childBirthDate, parentBirthDate }) {
+  const day = s => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s) && !isNaN(Date.parse(s)) && new Date(s).toISOString().slice(0, 10) === s ? s : null;
+  const child = day(childBirthDate), parent = day(parentBirthDate);
+  // A day ahead of today in UTC, so today counts wherever the parent is.
+  const latest = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const grownUp = new Date(Date.now() + 24 * 60 * 60 * 1000); grownUp.setUTCFullYear(grownUp.getUTCFullYear() - 18);
+  if (!child || !parent) return { error: "Fill in both birth dates: the child's and the parent's." };
+  if (child > latest || parent > latest) return { error: "A birth date can't be in the future." };
+  if (child < "1900-01-01" || parent < "1900-01-01") return { error: "Check the birth dates. One of them is too long ago." };
+  if (parent >= child) return { error: "The parent has to be born before the child." };
+  if (parent > grownUp.toISOString().slice(0, 10)) return { error: "The parent has to be 18 or older." };
+  return { child, parent };
+}
+const hasBirthDates = userId => Boolean(db.prepare("SELECT 1 FROM users WHERE id=? AND kid_birth_date IS NOT NULL AND parent_birth_date IS NOT NULL").get(userId));
+// Puts someone in the kiddy zone, saving the parent's email, password, face and the birth dates when they've just been
+// chosen. 18+ goes off, along with any 18+ checks they'd started.
+const enterKidZone = db.transaction((userId, parent) => {
+  if (parent?.email) db.prepare("UPDATE users SET kid_email=?, kid_pass_hash=? WHERE id=?").run(parent.email, parent.passHash, userId);
+  if (parent?.face) db.prepare("UPDATE users SET kid_face=? WHERE id=?").run(parent.face, userId);
+  if (parent?.born) db.prepare("UPDATE users SET kid_birth_date=?, parent_birth_date=? WHERE id=?").run(parent.born.child, parent.born.parent, userId);
+  db.prepare("UPDATE users SET kid_on=1, adult_on=0 WHERE id=?").run(userId);
+  db.prepare("DELETE FROM kid_checks WHERE user_id=?").run(userId);
+  db.prepare("DELETE FROM adult_checks WHERE user_id=?").run(userId);
+});
+
+// Save a new parent face (when a different parent takes over, or the account was set up before faces), with the parent password.
+app.put("/api/kid/face", requireAuth, kidPasswordLimiter, async (req, res, next) => {
+  try {
+    const me = req.session.userId, { passHash } = kidRow(me);
+    if (!passHash) return res.status(403).json({ error: "A parent has to set up the kiddy zone first." });
+    if (!await bcrypt.compare(String(req.body.password || ""), passHash)) return res.status(403).json({ error: "That parent password isn't right." });
+    const face = parentFace(req.body);
+    if (face.error) return res.status(400).json(face);
+    db.prepare("UPDATE users SET kid_face=? WHERE id=?").run(face.face, me);
+    res.json({ user: publicUser(currentUser(req)) });
+  } catch (err) { next(err); }
+});
+
+// ---- Learn! 📚 ----
+// A quiz game, only in the kiddy zone. With the parent password, a parent chooses each subject's class (1 to 9) and
+// whether the child is from Asia or the West, and verifies the child's faith before Islam or Christianity opens. Each
+// only opens at all for accounts of that religion: Islam for Islam, Christianity for Christianity.
+const LEARN_SUBJECTS = ["math", "english", "science", "islam", "christianity"], FAITH_SUBJECTS = ["islam", "christianity"], LEARN_REGIONS = ["asia", "western"];
+// Why a faith subject is locked for someone's religion, or null if it isn't.
+const religionLock = (userId, subject) => FAITH_SUBJECTS.includes(subject) && identityOf(userId).religion !== subject
+  ? `${subject === "islam" ? "Islam" : "Christianity"} is only for accounts whose religion is ${subject === "islam" ? "Islam" : "Christianity"}.` : null;
+// Islam verifications from before learn_verified move into it.
+db.exec("INSERT OR IGNORE INTO learn_verified(user_id,subject) SELECT id,'islam' FROM users WHERE learn_muslim=1");
+function learnPayload(userId) {
+  const levels = {};
+  for (const l of db.prepare("SELECT subject, grade, region FROM learn_levels WHERE user_id=?").all(userId)) levels[l.subject] = { grade: l.grade, region: l.region };
+  return { verified: db.prepare("SELECT subject FROM learn_verified WHERE user_id=?").all(userId).map(v => v.subject), levels };
+}
+const requireKidZone = (req, res, next) => inKidZone(req.session.userId) ? next() : res.status(403).json({ error: "Learn! is only in the kiddy zone." });
+// Admins never need the parent password.
+const parentPasswordOk = async (userId, password) => {
+  const { passHash } = kidRow(userId);
+  return isAdmin(userId) || (Boolean(passHash) && bcrypt.compare(String(password || ""), passHash));
+};
+const wrongParentPassword = res => res.status(403).json({ error: "That parent password isn't right." });
+// Only checks the parent password, so a parent can open the class list.
+app.post("/api/kid/check", requireAuth, kidPasswordLimiter, async (req, res, next) => {
+  try { await parentPasswordOk(req.session.userId, req.body.password) ? res.json({ ok: true }) : wrongParentPassword(res); } catch (err) { next(err); }
+});
+// A parent verifying a faith subject (Islam or Christianity) for their child, with the parent password or a face scan
+// that matches the parent's saved face.
+app.post("/api/learn/:subject/verify", requireAuth, requireKidZone, kidPasswordLimiter, async (req, res, next) => {
+  try {
+    const me = req.session.userId, subject = req.params.subject;
+    if (!FAITH_SUBJECTS.includes(subject)) return res.status(404).json({ error: "Only Islam and Christianity need a parent to verify." });
+    if (religionLock(me, subject)) return res.status(403).json({ error: religionLock(me, subject) });
+    if (req.body.face !== undefined) {
+      const saved = kidRow(me).face, face = cleanFace(req.body.face);
+      if (!saved) return res.status(400).json({ error: "No parent face is saved yet, so use the parent password." });
+      if (!face || !sameFace(face, JSON.parse(saved))) return res.status(403).json({ error: "That isn't the parent's face. Try again, or use the parent password." });
+    } else if (!await parentPasswordOk(me, req.body.password)) return wrongParentPassword(res);
+    db.prepare("INSERT OR IGNORE INTO learn_verified(user_id,subject) VALUES(?,?)").run(me, subject);
+    res.json(learnPayload(me));
+  } catch (err) { next(err); }
+});
+app.put("/api/learn/:subject", requireAuth, requireKidZone, kidPasswordLimiter, async (req, res, next) => {
+  try {
+    const me = req.session.userId, subject = req.params.subject, grade = Number(req.body.grade), region = req.body.region;
+    if (!LEARN_SUBJECTS.includes(subject)) return res.status(404).json({ error: "There's no subject like that." });
+    if (religionLock(me, subject)) return res.status(403).json({ error: religionLock(me, subject) });
+    if (!Number.isInteger(grade) || grade < 1 || grade > 9) return res.status(400).json({ error: "Choose a class from 1 to 9." });
+    if (!LEARN_REGIONS.includes(region)) return res.status(400).json({ error: "Choose Asia or Western." });
+    if (!await parentPasswordOk(me, req.body.password)) return wrongParentPassword(res);
+    if (FAITH_SUBJECTS.includes(subject) && !learnPayload(me).verified.includes(subject)) return res.status(403).json({ error: "A parent needs to verify this subject first." });
+    db.prepare(`INSERT INTO learn_levels(user_id,subject,grade,region) VALUES(?,?,?,?)
+      ON CONFLICT(user_id,subject) DO UPDATE SET grade=excluded.grade, region=excluded.region`).run(me, subject, grade, region);
+    res.json(learnPayload(me));
+  } catch (err) { next(err); }
+});
+
+// Turn the kiddy zone on (once a parent has set it up) or off (only with the parent password).
+app.put("/api/kid", requireAuth, kidPasswordLimiter, async (req, res, next) => {
+  try {
+    const me = req.session.userId, on = req.body.on === true, admin = isAdmin(me);
+    if (!kidRow(me).passHash && !admin) return res.status(403).json({ error: "A parent has to set up the kiddy zone first." });
+    if (on && inZone(me) && !admin) return res.status(403).json({ error: "Turn off 18+ first." });
+    // Accounts set up before birth dates were asked for fill them in before going back in.
+    const born = on && !admin && !hasBirthDates(me) ? birthDates(req.body) : null;
+    if (born?.error) return res.status(400).json(born);
+    if (on) enterKidZone(me, { born });
+    else if (!await parentPasswordOk(me, req.body.password)) return wrongParentPassword(res);
+    else db.prepare("UPDATE users SET kid_on=0 WHERE id=?").run(me);
+    res.json({ user: publicUser(currentUser(req)) });
+  } catch (err) { next(err); }
 });
 
 app.get("/api/codes", requireAuth, (req, res) => res.json(codesPayload(req.session.userId)));
@@ -974,7 +1555,7 @@ app.delete("/api/groups/:id/join", requireAuth, (req, res) => {
 app.delete("/api/groups/:id", requireAuth, (req, res) => {
   const me = req.session.userId, id = Number(req.params.id), key = String(id);
   const files = db.transaction(() => {
-    if (!db.prepare("DELETE FROM community_groups WHERE id=? AND owner_id=?").run(id, me).changes) return null;
+    if (!db.prepare("DELETE FROM community_groups WHERE id=? AND (owner_id=? OR ?)").run(id, me, isAdmin(me) ? 1 : 0).changes) return null;
     // The group's posts and chat go with it.
     const media = db.prepare("SELECT media_path FROM posts WHERE group_key=? AND media_path IS NOT NULL").all(key).map(r => r.media_path);
     db.prepare("DELETE FROM posts WHERE group_key=?").run(key);
@@ -1029,7 +1610,8 @@ app.post("/api/friends/request", requireAuth, friendLimiter, (req, res) => {
   const other = db.prepare("SELECT id FROM users WHERE username = ? COLLATE NOCASE").get(String(req.body.username || "").trim());
   if (!other) return res.status(404).json({ error: "No Yakimma account has that username." });
   if (other.id === me) return res.status(400).json({ error: "You can't add yourself as a friend." });
-  if (inZone(me) && !isAdult(other.id)) return res.status(403).json({ error: "You're in the 18+ zone, so you can only add people who are 18+." });
+  const zoneErr = zoneError(me, other.id);
+  if (zoneErr) return res.status(403).json({ error: zoneErr });
   if (db.prepare("SELECT 1 FROM blocks WHERE blocker_id=? AND blocked_id=?").get(me, other.id)) return res.status(400).json({ error: "You blocked this person. Unblock them on the Friends page first." });
   if (db.prepare("SELECT 1 FROM blocks WHERE blocker_id=? AND blocked_id=?").get(other.id, me)) return res.status(403).json({ error: "You can't send a friend request to this person." });
   const tx = db.transaction(() => {
@@ -1154,7 +1736,7 @@ for (const [base, chatOf] of [["/api/groups/:id/messages", groupChatOf], ["/api/
     } else {
       const friendId = Number(req.body.toFriend);
       if (!Number.isSafeInteger(friendId) || !areFriends(me, friendId)) return res.status(403).json({ error: "You can only forward to your friends." });
-      if (!canTalk(me, friendId)) return res.status(403).json({ error: talkError(me) });
+      if (!canTalk(me, friendId)) return res.status(403).json({ error: talkError(me, friendId) });
       to = friendChatFor(me, friendId);
     }
     insertMessage(to, me, msg.body, 1);
@@ -1170,8 +1752,110 @@ app.post("/api/blocks", requireAuth, (req, res) => {
   db.transaction(() => {
     db.prepare("INSERT OR IGNORE INTO blocks(blocker_id,blocked_id) VALUES(?,?)").run(me, other);
     db.prepare("DELETE FROM friendships WHERE (requester_id=? AND addressee_id=?) OR (requester_id=? AND addressee_id=?)").run(me, other, other, me);
+    db.prepare("DELETE FROM follows WHERE (follower_id=? AND followee_id=?) OR (follower_id=? AND followee_id=?)").run(me, other, other, me);
   })();
   res.json(friendsPayload(me));
+});
+
+// ---- Finding people 🔎 ----
+// Searching usernames on the Friends page, scrolling through everyone on Yakimma, and seeing someone's profile and who
+// follows them. You find everyone, whatever zone they're in, except people who blocked you or you blocked. Sending a
+// friend request or following someone still has the zone rules (see zoneError).
+function canSee(viewerId, otherId) {
+  return viewerId === otherId || !db.prepare("SELECT 1 FROM blocks WHERE (blocker_id=? AND blocked_id=?) OR (blocker_id=? AND blocked_id=?)").get(viewerId, otherId, otherId, viewerId);
+}
+// Why someone can't add or follow another person from the zone they're in, or null if they can.
+function zoneError(me, other) {
+  if (inZone(me) && !isAdult(other)) return "You're in the 18+ zone, so you can only add and follow people who are 18+.";
+  if (inKidZone(me) && !inKidZone(other)) return "You're in the kiddy zone, so you can only add and follow people who are in it too.";
+  if (!inKidZone(me) && inKidZone(other)) return "They're in the kiddy zone, so only people in the kiddy zone can add or follow them.";
+  return null;
+}
+// Someone in a list of people, with how many followers they have and how many people they follow.
+const personItem = u => ({ id: u.id, username: u.username, avatar: avatarOf(u), ...followCounts(u.id) });
+const SEARCH_RESULTS = 20;
+app.get("/api/users", requireAuth, (req, res) => {
+  const me = req.session.userId, q = String(req.query.q || "").replace(/[^A-Za-z0-9]/g, "").slice(0, 20);
+  if (!q) return res.json({ users: [] });
+  // Exact matches first, then names that start with the search, then shorter names.
+  const users = db.prepare(`SELECT id, username, avatar_emoji, avatar_bg, avatar_path FROM users WHERE username LIKE ? AND id<>?
+    ORDER BY lower(username)=lower(?) DESC, username LIKE ? DESC, length(username), username COLLATE NOCASE LIMIT 200`).all(`%${q}%`, me, q, `${q}%`)
+    .filter(u => canSee(me, u.id)).slice(0, SEARCH_RESULTS).map(personItem);
+  res.json({ users });
+});
+// Everyone you could find, a page at a time in sign-up order, for scrolling through on the Friends page. `after` is
+// the last account already looked at; `next` says where to carry on, or is null once every account has been seen.
+const PEOPLE_PAGE = 30;
+app.get("/api/people", requireAuth, (req, res) => {
+  const me = req.session.userId, users = [], batch = db.prepare("SELECT id, username, avatar_emoji, avatar_bg, avatar_path FROM users WHERE id>? ORDER BY id LIMIT 100");
+  let next = Math.max(0, Number(req.query.after) || 0);
+  while (users.length < PEOPLE_PAGE) {
+    const rows = batch.all(next);
+    if (!rows.length) { next = null; break; }
+    for (const u of rows) {
+      next = u.id;
+      if (u.id !== me && canSee(me, u.id)) users.push(personItem(u));
+      if (users.length === PEOPLE_PAGE) break;
+    }
+  }
+  res.json({ users, next });
+});
+// Someone's profile: who they are, their MC, LC, items, friends and followers, whether you're friends or following,
+// and their posts you're allowed to see.
+function profilePayload(viewerId, userId) {
+  const u = db.prepare("SELECT id, username, mc, lc, avatar_emoji, avatar_bg, avatar_path FROM users WHERE id=?").get(userId);
+  const f = db.prepare(`SELECT id, status, requester_id AS requesterId FROM friendships
+    WHERE (requester_id=? AND addressee_id=?) OR (requester_id=? AND addressee_id=?)`).get(viewerId, userId, userId, viewerId);
+  return {
+    user: { id: u.id, username: u.username, accountNumber: accountNumber(u.id), avatar: avatarOf(u), ...identityOf(userId) },
+    mc: u.mc, lc: u.lc,
+    items: db.prepare("SELECT COUNT(*) AS n FROM inventory WHERE user_id=?").get(userId).n,
+    friends: db.prepare("SELECT COUNT(*) AS n FROM friendships WHERE status='accepted' AND (requester_id=? OR addressee_id=?)").get(userId, userId).n,
+    ...followCounts(userId),
+    youFollow: Boolean(db.prepare("SELECT 1 FROM follows WHERE follower_id=? AND followee_id=?").get(viewerId, userId)),
+    followsYou: Boolean(db.prepare("SELECT 1 FROM follows WHERE follower_id=? AND followee_id=?").get(userId, viewerId)),
+    friend: !f ? "none" : f.status === "accepted" ? "friends" : f.requesterId === viewerId ? "sent" : "received",
+    zoneNote: zoneError(viewerId, userId),
+    requestId: f?.id ?? null,
+    posts: selectPosts(viewerId, `p.user_id=? AND p.group_key IS NULL AND ${SEES_POST} AND p.adult=? AND p.kid=?`, [userId, viewerId, viewerId, viewerId, ...postZone(viewerId)], "DESC", 30)
+  };
+}
+// The person in the URL, if the viewer may see them.
+function seenPerson(req, res) {
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || !db.prepare("SELECT 1 FROM users WHERE id=?").get(id) || !canSee(req.session.userId, id)) { res.status(404).json({ error: "That person couldn't be found." }); return null; }
+  return id;
+}
+app.get("/api/users/:id", requireAuth, (req, res) => {
+  const id = seenPerson(req, res);
+  if (id) res.json(profilePayload(req.session.userId, id));
+});
+// Who follows someone, or who they follow, for anyone whose profile you can see (yourself too), with their own follower
+// counts. People you can't see (because of a block) are left out and only counted.
+for (const [list, them, they] of [["followers", "follower_id", "followee_id"], ["following", "followee_id", "follower_id"]]) {
+  app.get(`/api/users/:id/${list}`, requireAuth, (req, res) => {
+    const me = req.session.userId, id = seenPerson(req, res);
+    if (!id) return;
+    const rows = db.prepare(`SELECT u.id, u.username, u.avatar_emoji, u.avatar_bg, u.avatar_path FROM follows f JOIN users u ON u.id=f.${them}
+      WHERE f.${they}=? ORDER BY f.created_at DESC LIMIT 500`).all(id);
+    const users = rows.filter(u => canSee(me, u.id)).map(personItem);
+    res.json({ users, hidden: rows.length - users.length });
+  });
+}
+const followLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 60, standardHeaders: true, legacyHeaders: false, message: { error: "You're following and unfollowing very fast. Please wait a little while." } });
+app.post("/api/users/:id/follow", requireAuth, followLimiter, (req, res) => {
+  const me = req.session.userId, id = seenPerson(req, res);
+  if (!id) return;
+  if (id === me) return res.status(400).json({ error: "You can't follow yourself." });
+  const zoneErr = zoneError(me, id);
+  if (zoneErr) return res.status(403).json({ error: zoneErr });
+  db.prepare("INSERT OR IGNORE INTO follows(follower_id,followee_id) VALUES(?,?)").run(me, id);
+  res.json(profilePayload(me, id));
+});
+app.delete("/api/users/:id/follow", requireAuth, (req, res) => {
+  const me = req.session.userId, id = Number(req.params.id);
+  db.prepare("DELETE FROM follows WHERE follower_id=? AND followee_id=?").run(me, id);
+  res.json(Number.isSafeInteger(id) && canSee(me, id) && db.prepare("SELECT 1 FROM users WHERE id=?").get(id) ? profilePayload(me, id) : { ok: true });
 });
 
 app.delete("/api/blocks/:userId", requireAuth, (req, res) => {
@@ -1222,7 +1906,7 @@ app.post("/api/nails", requireAuth, (req, res) => {
   if (!ownsItem(me, "nails")) return res.status(403).json({ error: "Unlock Nails in the Shop first." });
   // You can do your own nails, or a friend's.
   if (friendId !== me && (!Number.isSafeInteger(friendId) || !areFriends(me, friendId))) return res.status(403).json({ error: "You can only do nails for yourself or your friends." });
-  if (friendId !== me && !canTalk(me, friendId)) return res.status(403).json({ error: talkError(me) });
+  if (friendId !== me && !canTalk(me, friendId)) return res.status(403).json({ error: talkError(me, friendId) });
   const design = cleanDesign(req.body.design);
   if (!design) return res.status(400).json({ error: "That nail design isn't valid." });
   const locked = design.nails.flatMap(n => n.arts).map(a => nailOptions.arts.find(o => o.id === a.id)).find(a => a.item && !ownsItem(me, a.item));
@@ -1266,7 +1950,9 @@ app.delete("/api/pictures/:id", requireAuth, (req, res) => {
 app.get("/vendor/modern-screenshot.js", (_req, res) => res.sendFile(path.join(__dirname, "node_modules", "modern-screenshot", "dist", "index.js")));
 // The 18+ face scan's library and its two models (finding a face, and guessing its age). It all runs in the browser.
 const FACE_DIR = path.join(__dirname, "node_modules", "@vladmandic", "face-api");
-const FACE_MODELS = new Set(["tiny_face_detector_model-weights_manifest.json", "tiny_face_detector_model.bin", "age_gender_model-weights_manifest.json", "age_gender_model.bin"]);
+const FACE_MODELS = new Set(["tiny_face_detector_model-weights_manifest.json", "tiny_face_detector_model.bin", "age_gender_model-weights_manifest.json", "age_gender_model.bin",
+  // For recognising the parent's face in the kiddy zone.
+  "face_landmark_68_model-weights_manifest.json", "face_landmark_68_model.bin", "face_recognition_model-weights_manifest.json", "face_recognition_model.bin"]);
 app.get("/vendor/face-api.js", (_req, res) => res.sendFile(path.join(FACE_DIR, "dist", "face-api.js")));
 app.get("/vendor/face-model/:file", (req, res) => FACE_MODELS.has(req.params.file) ? res.sendFile(path.join(FACE_DIR, "model", req.params.file)) : res.sendStatus(404));
 

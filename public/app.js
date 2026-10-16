@@ -51,7 +51,9 @@
   const priceLabel = p => p.currency === "LC" ? `💌 ${p.price} LC` : `🐱 ${p.price} MC`;
   function hero(title, desc, tag = "YOUR LITTLE CORNER OF THE INTERNET") {
     const zone = zoneOn();
-    return `<section class="hero"><div><span class="pill">${zone ? "🔞 18+ · " : ""}${tag}</span><h1>${title}</h1><p>${desc}</p></div><div style="font-size:3.2rem" aria-hidden="true">${zone ? "👹🩸" : themeById(activeTheme())?.art || "🌸🩵"}</div></section>`;
+    // In the 18+ zone only Kuchisake-onna's page (which takes the place of Nails) gets the 👹🩸 art.
+    const art = zone ? (state.page === "nails" ? "👹🩸" : "") : themeById(activeTheme())?.art || "🌸🩵";
+    return `<section class="hero"><div><span class="pill">${zone ? "🔞 18+ · " : kidOn() ? "🧸 KIDDY ZONE · " : ""}${tag}</span><h1>${title}</h1><p>${desc}</p></div>${art ? `<div style="font-size:3.2rem" aria-hidden="true">${art}</div>` : ""}</section>`;
   }
   const bgCss = id => (state.avatarOptions.backgrounds.find(b => b.id === id) || state.avatarOptions.backgrounds[0])?.css || "linear-gradient(135deg,var(--pink2),var(--teal2))";
   function avatarHTML(a, size = "") {
@@ -77,12 +79,14 @@
   }
   async function refresh() {
     const [me, feed] = await Promise.all([api("/api/me"), api("/api/posts")]);
-    state.user = me.user; state.products = me.products || []; state.inventory = me.inventory || []; state.posts = feed.posts || [];
+    state.user = me.user; state.products = me.products || []; state.inventory = me.inventory || []; state.posts = feed.posts || []; state.learnData = me.learn || null; state.reportReasons = me.reportReasons || []; state.usernameCost = me.usernameCost; state.songs = me.songs || [];
+    if (me.religions) Object.assign(state, { religions: me.religions, countries: me.countries });
     if (me.themes) state.themes = me.themes;
     if (me.nailOptions) state.nailOptions = me.nailOptions;
     if (me.avatarOptions) state.avatarOptions = me.avatarOptions;
     await loadSocial();
     wallet();
+    if (state.user && !(state.user.religion && state.user.country)) identityModal();
   }
   const setGroups = d => { state.groups = d.groups; state.groupIcons = d.icons; };
   async function loadGroups() { setGroups(await api("/api/groups")); }
@@ -93,12 +97,15 @@
     const d = await api(`/api/me/posts?order=${order}${after ? `&after=${after}` : ""}`);
     state.myPosts = { order, total: d.total, more: d.more, posts: more ? [...m.posts, ...d.posts] : d.posts };
   }
+  async function loadPlaylist() { state.playlist = (await api("/api/me/playlist")).posts; }
   async function loadPageData() {
     if (state.user && ["friends", "nails", "profile"].includes(state.page)) await loadSocial();
-    if (state.user && state.page === "profile") await loadMyPosts();
+    if (state.user && state.page === "profile") await Promise.all([loadMyPosts(), loadPlaylist()]);
     if (state.page === "groups") await loadGroups();
     if (state.page === "codes") await loadCodes();
     if (state.user && state.page === "pictures") state.pictures = await api("/api/pictures");
+    if (state.user?.admin && state.page === "reports") state.reports = await api("/api/reports");
+    if (state.page === "post") state.single = await api(`/api/posts/${encodeURIComponent(state.postKey)}`).then(d => ({ post: d.post }), err => ({ error: err.message }));
   }
 
   // ---- Hand + nail drawing (SVG). Fingers are drawn pointing up; each nail is built in its finger's own coordinates. ----
@@ -381,11 +388,12 @@
     if (matchMedia("(hover: hover)").matches) $("#emojiSearch").focus();
   }
   async function openForward(msgId) {
-    const c = state.chat, groups = (await api("/api/groups")).groups.filter(g => g.joined), friends = state.social.friends;
+    const c = state.chat, groups = kidOn() ? [] : (await api("/api/groups")).groups.filter(g => g.joined), friends = state.social.friends;
     const target = (attr, id, face, name) => `<button type="button" class="fwd-target" data-${attr}="${safe(id)}" data-name="${safe(name)}">${face}<span>${safe(name)}</span></button>`;
     $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal fwd-modal" role="dialog" aria-modal="true" aria-labelledby="fwdTitle"><div class="row between"><h2 id="fwdTitle">↪️ Forward to…</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
       `<h3>Friends</h3>${friends.length ? `<div class="fwd-list">${friends.map(f => target("fwd-friend", f.id, avatarHTML(f.avatar, "tiny"), f.username)).join("")}</div>` : `<p class="muted">No friends yet.</p>`}` +
-      `<h3>Groups</h3>${groups.length ? `<div class="fwd-list">${groups.map(g => target("fwd-group", g.id, `<span class="avatar tiny" aria-hidden="true">${safe(g.icon)}</span>`, g.name)).join("")}</div>` : `<p class="muted">You're not in any groups yet.</p>`}</section></div>`;
+      // Groups aren't in the kiddy zone.
+      (kidOn() ? "" : `<h3>Groups</h3>${groups.length ? `<div class="fwd-list">${groups.map(g => target("fwd-group", g.id, `<span class="avatar tiny" aria-hidden="true">${safe(g.icon)}</span>`, g.name)).join("")}</div>` : `<p class="muted">You're not in any groups yet.</p>`}`) + `</section></div>`;
     $("#closeModal").onclick = closeModal;
     $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
     $(".fwd-modal").addEventListener("click", async e => {
@@ -445,8 +453,78 @@
   function personRow(person, sub, actions) {
     return `<div class="person"><div class="person-main">${avatarHTML(person.avatar)}<div><strong>${safe(person.username)}</strong><small>${sub}</small></div></div><div class="row">${actions}</div></div>`;
   }
+  // Someone in a list, with their followers and who they follow (tap either to see them) and a link to their profile.
+  const personCard = u => personRow(u, "", `${followPills(u.id, u.followers, u.following, u.username)}<button class="primary" data-view-person="${u.id}">👤 See profile</button>`);
+  // Everyone on Yakimma, whatever zone they're in, on the Friends page. More load as you scroll to the end of the list,
+  // until every account has been seen.
+  const peopleEnd = () => state.people?.next === null
+    ? `<p id="peopleEnd" class="muted">${state.people.users.length ? "That's everyone on Yakimma! 🎉" : "Nobody else is here yet."}</p>`
+    : `<p id="peopleEnd" class="muted">Loading more people…</p>`;
+  const peopleWatcher = new IntersectionObserver(seen => { if (seen.some(e => e.isIntersecting)) loadPeople(); }, { rootMargin: "300px" });
+  function watchPeople() {
+    peopleWatcher.disconnect();
+    if ($("#peopleEnd") && state.people?.next !== null) peopleWatcher.observe($("#peopleEnd"));
+  }
+  // New people are added to the list as it is, so nothing typed in the search box is lost.
+  async function loadPeople() {
+    const p = state.people ||= { users: [], next: 0 };
+    if (p.loading || p.next === null) return;
+    p.loading = true;
+    try {
+      const d = await api(`/api/people?after=${p.next}`);
+      p.users.push(...d.users); p.next = d.next;
+      $("#peopleList")?.insertAdjacentHTML("beforeend", d.users.map(personCard).join(""));
+      if ($("#peopleEnd")) $("#peopleEnd").outerHTML = peopleEnd();
+    } catch (err) { toast(err.message, true); }
+    finally { p.loading = false; watchPeople(); }
+  }
+  // Someone else's profile, opened from a search on the Friends page: send them a friend request or follow them.
+  // One post on its own, opened from its link (/post/<code>).
+  function postPage() {
+    const top = hero("A post 🔗", "A post someone shared.", "POST"), s = state.single;
+    if (!s) return top + `<section class="panel empty">Loading…</section>`;
+    return top + `<section class="panel"><button class="soft" data-page="feed">← Feed</button></section>` + (s.post ? postCard(s.post) : `<section class="panel empty">${safe(s.error)}</section>`);
+  }
+  async function openPerson(id) {
+    state.person = await api(`/api/users/${id}`);
+    closeModal(); state.page = "person"; state.personTab = "all"; state.notice = ""; render(); window.scrollTo(0, 0);
+  }
+  // Who follows someone ("followers") or who they follow ("following"), yourself included, in a pop-up.
+  async function followList(userId, list, name) {
+    const d = await api(`/api/users/${userId}/${list}`), mine = userId === state.user.id;
+    const row = u => u.id === state.user.id ? personRow(u, "", `<span class="pill">That's you</span>`) : personCard(u);
+    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="followTitle"><div class="row between"><h2 id="followTitle">${list === "followers" ? `👀 ${mine ? "Your" : `${safe(name)}'s`} followers` : `➡️ Who ${mine ? "you follow" : `${safe(name)} follows`}`}</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
+      (d.users.map(row).join("") || `<p class="muted">${list === "followers" ? "No followers yet." : "Not following anyone yet."}</p>`) +
+      (d.hidden ? `<p class="muted-note">And ${d.hidden} more you can't see.</p>` : "") + `</section></div>`;
+    $("#closeModal").onclick = closeModal;
+    $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
+  }
+  const followPills = (userId, followers, following, name) => `<button class="pill pill-btn" data-follow-list="followers" data-user="${userId}" data-name="${safe(name)}">👀 ${followers} follower${followers === 1 ? "" : "s"}</button>` +
+    `<button class="pill pill-btn" data-follow-list="following" data-user="${userId}" data-name="${safe(name)}">➡️ ${following} following</button>`;
+  function personPage() {
+    const p = state.person, u = p.user, plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+    const friend = {
+      friends: `<button class="soft" disabled>👯 Friends ✓</button>`,
+      sent: `<button class="soft" disabled>💌 Friend request sent</button>`,
+      received: `<button class="primary" data-accept-person="${p.requestId}">💌 Accept Friend Request</button>`,
+      none: `<button class="primary" data-friend-person="${safe(u.username)}">💌 Send Friend Request</button>`
+    }[p.friend];
+    const follow = p.youFollow ? `<button class="soft" data-unfollow="${u.id}">✓ Following</button>` : `<button class="primary" data-follow="${u.id}">➕ Follow</button>`;
+    // Someone in another zone shows up, but you can't add or follow them (you can still unfollow them).
+    const actions = p.zoneNote ? `${p.friend === "none" ? "" : friend}${p.youFollow ? follow : ""}` : friend + follow;
+    // Like a YouTube channel: everything, just their videos, or just their photo and text posts.
+    const isVideo = x => x.mediaType?.startsWith("video/"), tab = state.personTab || "all";
+    const lists = { all: p.posts, videos: p.posts.filter(isVideo), posts: p.posts.filter(x => !isVideo(x)) }, shown = lists[tab];
+    const tabs = [["all", "All"], ["videos", "🎬 Videos"], ["posts", "📝 Posts"]].map(([id, label]) => `<button class="step ${tab === id ? "on" : ""}" data-person-tab="${id}" aria-pressed="${tab === id}">${label} (${lists[id].length})</button>`).join("");
+    return hero(`${safe(u.username)} 👤`, `See ${safe(u.username)}'s wallet, items and posts, send a friend request, or follow them.`, "PROFILE") +
+      `<section class="panel"><button class="soft" data-page="friends">← Friends</button><div class="posthead" style="margin-top:12px">${avatarHTML(u.avatar, "big")}<div><h2 style="margin:0">${safe(u.username)}</h2>` +
+      `<small>🔢 Account number ${u.accountNumber}${p.followsYou ? " · Follows you" : ""}</small></div></div>` +
+      `<div class="row"><span class="pill">🐱 ${p.mc} MC</span><span class="pill">💌 ${p.lc} LC</span><span class="pill">🎁 ${plural(p.items, "item")}</span><span class="pill">👯 ${plural(p.friends, "friend")}</span>${identityPills(u)}` +
+      `${followPills(u.id, p.followers, p.following, u.username)}</div>${actions ? `<div class="actions">${actions}</div>` : ""}${p.zoneNote ? `<p class="muted-note">${safe(p.zoneNote)}</p>` : ""}</section>` +
+      `<section class="panel"><h3>${safe(u.username)}'s posts (${p.posts.length})</h3><div class="tabs" role="group" aria-label="Which posts">${tabs}</div>${shown.length ? "" : `<p class="muted">${tab === "videos" ? "No videos to see yet." : "No posts to see yet."}</p>`}</section><div class="feed">${shown.map(postCard).join("")}</div>`;
+  }
   function friendsPage() {
-    const top = hero("Friends 👯", "Add friends by their Yakimma username. Friends can do each other's nails in the Nail Salon.", "YOUR PEOPLE");
+    const top = hero("Friends 👯", "Search for people by their username to see their profile, then send them a friend request or follow them. Friends can do each other's nails in the Nail Salon.", "YOUR PEOPLE");
     if (!state.user) return top + signInPanel("Sign in to add friends.");
     const { friends, incoming, outgoing, blocked = [] } = state.social;
     const block = p => `<button class="soft" data-block="${p.userId ?? p.id}" data-name="${safe(p.username)}">🚫 Block</button>`;
@@ -457,7 +535,10 @@
     if (chatting) return hero(`Chat with ${safe(chatting.username)} 💬`, "Only you and your friend can see this chat.", "FRIEND CHAT") +
       `<section class="panel"><div class="row chat-head"><button class="soft" data-page="friends">← Friends</button>${avatarHTML(chatting.avatar)}<strong>${safe(chatting.username)}</strong></div>${chatBox(`Message ${chatting.username}`)}</section>`;
     return top +
-      `<section class="panel"><h2>Add a friend</h2><form id="friendForm" class="row nowrap"><label class="sr-only" for="friendName">Friend's username</label><input id="friendName" maxlength="20" placeholder="Their username" autocomplete="off" required><button class="primary" type="submit">Send request</button></form><p class="muted-note">Your friend needs their own Yakimma account. Ask them for their exact username.</p></section>` +
+      `<section class="panel"><h2>Find people 🔎</h2><form id="friendForm" class="row nowrap"><label class="sr-only" for="friendName">Their username</label><input id="friendName" maxlength="20" placeholder="Their username" autocomplete="off" required value="${safe(state.friendSearch?.q || "")}"><button class="primary" type="submit">Search</button></form>` +
+        (state.friendSearch ? (state.friendSearch.users.map(personCard).join("") || `<p class="muted">Nobody has a username like "${safe(state.friendSearch.q)}".</p>`)
+          : `<p class="muted-note">Open someone's profile to send them a friend request or follow them.</p>`) + `</section>` +
+      `<section class="panel"><h2>👥 Everyone on Yakimma</h2><p class="muted-note">Scroll down to see more people.</p><div id="peopleList">${(state.people?.users || []).map(personCard).join("")}</div>${peopleEnd()}</section>` +
       (incoming.length ? `<section class="panel"><h2>Friend requests 💌</h2>${incoming.map(r => personRow(r, "wants to be your friend", `<button class="primary" data-accept="${r.requestId}">Accept</button><button class="soft" data-reject="${r.requestId}">Decline</button>${block(r)}`)).join("")}</section>` : "") +
       (ai ? `<section class="panel"><h2>AI assistant</h2>${personRow(ai, "Your Yakimma helper. AI messages you tips, like what you need to buy something in the Shop.", `<button class="primary" id="aiChat">💬 Chat${ai.unread ? ` <span class="badge" aria-label="${ai.unread} unread">${ai.unread}</span>` : ""}</button>`)}</section>` : "") +
       `<section class="panel"><h2>My friends (${friends.length})</h2>${friends.length ? friends.map(f => personRow(f, `<span class="tone-dot" style="background:${toneHex(f.handTone)}"></span> ${safe(toneName(f.handTone))} hand`, (f.canTalk === false ? `<button class="soft" disabled title="${zoneOn() ? "In the 18+ zone you can only talk to people who are 18+" : "They're in the 18+ zone right now"}">🔞 Can't chat</button>` : `<button class="primary" data-chat="${f.id}">💬 Chat${f.unread ? ` <span class="badge" aria-label="${f.unread} unread">${f.unread}</span>` : ""}</button>`) + (zoneOn() || f.canTalk === false ? "" : `<button class="soft" data-salon="${f.id}">💅 Do their nails</button>`) + `<button class="soft" data-unfriend="${f.id}" data-name="${safe(f.username)}">Remove</button>${block(f)}`)).join("") : `<p class="muted">No friends yet. Send a request above! 🌸</p>`}</section>` +
@@ -652,15 +733,16 @@
   // A group's row of faces and member count. Tapping it lists everyone in the group.
   const facesButton = g => `<button class="faces-btn" data-members="${safe(g.id)}" aria-label="See all ${g.members} member${g.members === 1 ? "" : "s"} of ${safe(g.name)}"><span class="faces">${g.faces.map(f => avatarHTML(f.avatar, "tiny")).join("")}</span><small>${g.members} member${g.members === 1 ? "" : "s"}</small></button>`;
   function groupCard(g) {
-    const mine = state.user?.id === g.ownerId;
+    const mine = state.user?.id === g.ownerId, del = `<button class="soft" data-delete-group="${g.id}" data-name="${safe(g.name)}">Delete</button>`;
     const open = g.joined ? `<button class="primary" data-open-group="${g.id}">💬 Open</button>` : "";
-    const action = !state.user ? "" : mine ? `${open}<button class="soft" data-delete-group="${g.id}" data-name="${safe(g.name)}">Delete</button>`
+    // Admins can delete anyone's group (but not the secret ones, which are built in).
+    const action = !state.user ? "" : mine ? `${open}${del}`
       : g.joined ? `${open}<button class="soft" data-leave-group="${g.id}">Leave</button>`
       : g.secret && !g.unlocked ? `<button class="soft" data-page="codes">🔒 Needs a code</button>` : `<button class="primary" data-join-group="${g.id}">Join</button>`;
     const tag = (g.secret ? ` <span class="pill">🔑 Secret</span>` : "") + (mine ? ` <span class="pill">Yours</span>` : g.joined ? ` <span class="pill">Joined ✓</span>` : "");
     return `<article class="group-card" data-search="${safe(`${g.name} ${g.description}`.toLowerCase())}"><div class="group-icon" aria-hidden="true">${safe(g.icon)}</div>` +
       `<div class="group-body"><h3>${safe(g.name)}${tag}</h3>${g.description ? `<p>${safe(g.description)}</p>` : ""}<div class="row">${facesButton(g)}<small>${g.secret ? "secret group" : `made by ${safe(g.owner)}`}</small></div></div>` +
-      `<div class="group-actions">${action}</div></article>`;
+      `<div class="group-actions">${action}${state.user?.admin && !mine && !g.secret ? del : ""}</div></article>`;
   }
   function groupPage() {
     const v = state.groupView, g = v.group;
@@ -715,16 +797,39 @@
       return `<button class="theme-card ${t.id === current ? "on" : ""}" data-theme="${t.id}" ${unlocked ? `data-use-theme="${t.id}"` : `data-page="shop"`} aria-pressed="${t.id === current}"><span class="theme-preview" aria-hidden="true"><i></i><i></i><i></i></span><strong>${t.icon} ${safe(t.name)}</strong><small>${status}</small></button>`;
     }).join("");
     return hero("Settings ⚙️", "Choose how Yakimma looks.", "YOUR PREFERENCES") +
+      songPanel() +
       `<section class="panel"><h2>Color theme</h2><div class="theme-grid">${cards}</div><p class="muted-note">${zoneOn() ? "The 18+ zone has its own theme. When you turn 18+ off, your normal theme comes back." : state.user ? "Your theme is saved to your account, so it follows you on any device." : "Free themes are saved in this browser. Sign in and buy Goth or Pastel in the Shop to unlock them."}</p></section>` +
-      adultPanel() +
-      `<section class="panel"><h3>Safety reminder 🔐</h3><p class="muted-note">Never share your password. Before public launch, Yakimma needs reporting, moderation, privacy rules, and secure production hosting.</p></section>`;
+      adultPanel() + kidPanel() +
+      `<section class="panel"><h3>Safety reminder 🔐</h3><p class="muted-note">Never share your password.</p></section>`;
+  }
+  // Admins can switch between the zones straight away, so they see both panels in every zone and skip the checks.
+  const adminZoneNote = () => state.user?.admin ? `<p class="muted-note">🛠️ You're an admin, so you can switch zones straight away, without the checks.</p>` : "";
+  const SONG_LOCKS = { adult: "🔞 Unlocks once you've been in the 18+ zone", kids: "🧸 Not in the kiddy zone", bangladeshiMuslim: "☪️🇧🇩 Only for Muslims from Bangladesh" };
+  function songPanel() {
+    if (!state.user) return "";
+    const current = state.user.song;
+    return `<section class="panel"><h2>🎵 Song</h2><p class="muted-note">Pick a song to play while you use Yakimma. It keeps playing on every page.</p><div class="song-list">` +
+      state.songs.map(s => `<button class="song ${s.id === current ? "on" : ""}" data-song="${s.id}" aria-pressed="${s.id === current}" ${s.ready && !s.lock ? "" : "disabled"}>` +
+        `<span>${s.lock ? "🔒" : s.file ? "🎵" : "🔇"} ${safe(s.name)}</span><small>${!s.ready ? "Not added yet" : SONG_LOCKS[s.lock] || (s.id === current ? (s.file ? "Playing ✓" : "On ✓") : "")}</small></button>`).join("") + `</div></section>`;
   }
   function adultPanel() {
     const adult = state.user?.adult;
-    if (!adult) return "";
+    if (!adult || (kidOn() && !state.user.admin)) return "";
     return `<section class="panel"><h2>🔞 18+</h2>` + (adult.on
       ? `<p>You're in the 18+ zone. You only see 18+ posts and groups, and you can only talk to people who are 18+.</p><button class="danger" id="adultOff">Turn off 18+</button>`
-      : `<p class="muted-note">${adult.verified ? "You've already done the 18+ checks, so you only need to confirm." : "For grown-ups only. To turn it on, you confirm you're 18+, enter a code we email you, and do a face scan."}</p><button class="primary" id="adultStart">Turn on 18+?</button>`) + `</section>`;
+      : (adminZoneNote() || `<p class="muted-note">${adult.verified ? "You've already done the 18+ checks, so you only need to confirm." : "For grown-ups only. To turn it on, you confirm you're 18+, enter a code we email you, and do a face scan."}</p>`) +
+        `<button class="primary" id="adultStart">Turn on 18+?</button>`) + `</section>`;
+  }
+  function kidPanel() {
+    const kid = state.user?.kid;
+    if (!kid || (zoneOn() && !state.user.admin)) return "";
+    if (state.user.admin) return `<section class="panel"><h2>🧸 Kiddy zone</h2>${adminZoneNote()}` +
+      (kid.on ? `<p>You're in the kiddy zone.</p><button class="danger" id="kidOffAdmin">Turn off the kiddy zone</button>` : `<button class="primary" id="kidStart">Turn on the kiddy zone?</button>`) + `</section>`;
+    return `<section class="panel"><h2>🧸 Kiddy zone</h2>` + (kid.on
+      ? `<p>You're in the kiddy zone. You only see kiddy zone posts, you can only add and talk to friends who are in it too, and you have Feed, Profile, Settings, Friends, Nails, Learn and the Shop. Only a parent can turn it off or sign out.</p>` +
+        `<form id="kidOffForm"><label for="kidOffPass">Parent password</label><input id="kidOffPass" type="password" autocomplete="current-password" maxlength="200" required><div class="actions"><button class="danger" type="submit">Turn off the kiddy zone</button><button class="soft" type="button" id="kidForgot">Forgot the parent password?</button></div></form>` +
+        `<h3>Signing out</h3><p class="muted-note">${kid.face ? "A parent signs out of the kiddy zone with the parent password or their face." : "A parent signs out of the kiddy zone with the parent password. If they save their face, they can use that too."}</p><button class="soft" id="kidFaceBtn">📷 ${kid.face ? "Change the parent's face" : "Save the parent's face"}</button>`
+      : `<p class="muted-note">${kid.ready ? "A parent has already set up the kiddy zone, so you only need to confirm." : "A safe part of Yakimma for kids. To turn it on, a parent types their email, enters the code we send them, chooses a parent-only password and, if they want, scans their face. Only a parent can turn it off or sign out."}</p><button class="primary" id="kidStart">Turn on the kiddy zone?</button>`) + `</section>`;
   }
   function shopButton(p) {
     const owned = state.inventory.includes(p.id), theme = state.themes.find(t => t.item === p.id);
@@ -734,6 +839,16 @@
     return state.user ? `<button class="primary" data-buy="${p.id}">Buy</button>` : `<button class="primary" data-sign-in>Buy</button>`;
   }
 
+  // Posts you put in your playlist, newest added first. The first few show until you open the whole playlist.
+  const PLAYLIST_PREVIEW = 3;
+  function playlistSection() {
+    const list = state.playlist;
+    if (!list) return `<section class="panel"><h3>🎶 My playlist</h3><p class="muted">Loading your playlist…</p></section>`;
+    const shown = state.playlistAll ? list : list.slice(0, PLAYLIST_PREVIEW);
+    return `<section class="panel"><h3>🎶 My playlist (${list.length})</h3><p class="muted-note">Posts you like or want to see later. Tap ➕ Playlist on any post to put it here.</p></section>` +
+      `<div class="feed">${shown.map(postCard).join("") || `<div class="panel empty">Your playlist is empty. Tap ➕ Playlist on a post to add it! 🎶</div>`}` +
+      (list.length > PLAYLIST_PREVIEW ? `<button class="soft" id="playlistAll">${state.playlistAll ? "Show less ⬆️" : `Show all ${list.length} ⬇️`}</button>` : "") + `</div>`;
+  }
   function myPostsSection() {
     const m = state.myPosts;
     if (!m) return `<section class="panel"><h3>My posts</h3><p class="muted">Loading your posts…</p></section>`;
@@ -782,18 +897,109 @@
     const effect = viewOf(p.id).effect;
     return `<div class="media-wrap fx-${effect}"><video class="media" src="${p.mediaUrl}" controls playsinline preload="metadata"></video><div class="fx-layer" aria-hidden="true">${fxParticles(effect)}</div></div>`;
   }
+  // Who can see a post, like YouTube: [id, label, what it means].
+  const VISIBILITY = [
+    ["public", "🌍 Public", "Everyone can see it, on the feed and your profile."],
+    ["unlisted", "🔗 Unlisted", "Only your friends on Yakimma can see it."],
+    ["private", "🔒 Private", "Only you can see it, on your profile."]
+  ];
+  const postLink = code => `${location.origin}/post/${code}`;
+  // Every copy of a post that's on show (feed, profiles, a group, its own page), to update them all at once.
+  const shownPosts = id => [state.posts, state.myPosts?.posts, state.playlist, state.groupView?.posts, state.reports?.posts, state.person?.posts, state.single?.post && [state.single.post]]
+    .flatMap(list => list || []).filter(p => p.id === id);
+  // Changing who can see one of your posts.
+  function visibilityModal(id) {
+    const now = shownPosts(id)[0]?.visibility || "public";
+    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="visTitle"><div class="row between"><h2 id="visTitle">👁️ Who can see it?</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
+      `<form id="visForm"><fieldset class="visibility"><legend>Who can see this post</legend>${VISIBILITY.map(([v, label, about]) => `<label class="vis-option"><input type="radio" name="newVisibility" value="${v}" ${v === now ? "checked" : ""}><span><strong>${label}</strong><small>${about}</small></span></label>`).join("")}</fieldset>` +
+      `<div class="actions"><button class="primary" type="submit">Save</button></div></form><p class="muted-note error-text" id="visError" role="alert"></p></section></div>`;
+    $("#closeModal").onclick = closeModal;
+    $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
+    $("#visForm").onsubmit = async e => {
+      e.preventDefault();
+      const visibility = $('input[name="newVisibility"]:checked').value;
+      try {
+        await api(`/api/posts/${id}/visibility`, send("PUT", { visibility }));
+        for (const p of shownPosts(id)) p.visibility = visibility;
+        state.posts = (await api("/api/posts")).posts;
+        closeModal(); toast(`Now: ${VISIBILITY.find(v => v[0] === visibility).slice(1).join(" ")}`);
+      } catch (err) { $("#visError").textContent = err.message; }
+    };
+  }
+  // Delete for your own posts (and every post, for admins); Report for other people's. You can change who sees your own
+  // posts (not group posts, which the whole group sees). Every post outside a group has its own link to copy.
+  function postTools(p) {
+    if (!state.user) return "";
+    const mine = state.user.id === p.userId;
+    return (mine && !p.inGroup ? `<button class="soft" data-post-visibility="${p.id}">👁️ Who can see it</button>` : "") +
+      (p.inGroup ? "" : `<button class="soft" data-copy-link="${safe(p.code)}" data-visibility="${p.visibility}">🔗 Copy link</button>`) + (mine || state.user.admin ? `<button class="soft" data-delete-post="${p.id}">🗑️ Delete</button>` : "") + (mine ? "" : `<button class="soft" data-report-post="${p.id}">🚩 Report</button>`);
+  }
+  // Putting a post in your playlist, or taking it out. Every copy of the post on show changes, and the playlist on your
+  // Profile loads again next time (taking a post out there removes it straight away).
+  async function togglePlaylist(id) {
+    const on = !shownPosts(id)[0]?.inPlaylist;
+    await api(`/api/posts/${id}/playlist`, { method: on ? "POST" : "DELETE" });
+    for (const p of shownPosts(id)) p.inPlaylist = on;
+    if (state.page === "profile" && !on) state.playlist = state.playlist?.filter(p => p.id !== id);
+    else if (state.page !== "profile") state.playlist = null;
+    else await loadPlaylist();
+    render(); toast(on ? "Added to your playlist 🎶 Find it on your Profile." : "Taken out of your playlist.");
+  }
+  async function deletePost(id) {
+    const p = [...state.posts, ...(state.myPosts?.posts || []), ...(state.groupView?.posts || []), ...(state.reports?.posts || []), ...(state.person?.posts || []), ...(state.single?.post ? [state.single.post] : [])].find(x => x.id === id);
+    const whose = p && p.userId !== state.user.id ? `${p.username}'s post` : "your post";
+    if (!confirm(`Delete ${whose}? This can't be undone.`)) return;
+    await api(`/api/posts/${id}`, { method: "DELETE" });
+    const gone = list => list?.filter(x => x.id !== id);
+    state.posts = gone(state.posts);
+    if (state.myPosts?.posts.some(x => x.id === id)) Object.assign(state.myPosts, { posts: gone(state.myPosts.posts), total: state.myPosts.total - 1 });
+    if (state.playlist) state.playlist = gone(state.playlist);
+    if (state.groupView?.posts) state.groupView.posts = gone(state.groupView.posts);
+    if (state.reports) state.reports.posts = gone(state.reports.posts);
+    if (state.person) state.person.posts = gone(state.person.posts);
+    if (state.single?.post?.id === id) state.single = { error: "This post was deleted." };
+    toast("The post is deleted 🗑️");
+  }
+  function reportModal(id) {
+    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="reportTitle"><div class="row between"><h2 id="reportTitle">🚩 Report this post</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
+      `<p>Why are you reporting it? Yakimma's admins will look at it.</p><div class="grade-list">${state.reportReasons.map((r, i) => `<button class="soft" data-reason="${i}">${safe(r)}</button>`).join("")}</div><p class="muted-note error-text" id="reportError" role="alert"></p></section></div>`;
+    $("#closeModal").onclick = closeModal;
+    $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
+    for (const btn of document.querySelectorAll("[data-reason]")) btn.onclick = async () => {
+      try { await api(`/api/posts/${id}/report`, send("POST", { reason: state.reportReasons[btn.dataset.reason] })); closeModal(); toast("Thanks for telling us. The post is reported 🚩"); }
+      catch (err) { $("#reportError").textContent = err.message; }
+    };
+  }
+  // The Reports page, only for admins and not in the kiddy zone: reported 18+ posts in the 18+ zone, and reported
+  // posts from the normal site and the kiddy zone everywhere else, with who reported them and why.
+  function reportsPage() {
+    const top = hero("Reports 🚩", "Posts people reported. Delete the ones that break the rules, or keep the ones that are fine.", "ADMINS ONLY"), list = state.reports?.posts;
+    if (!list) return top + `<section class="panel empty">Loading…</section>`;
+    return top + (list.map(p => `<section class="panel report"><h3>🚩 Reported ${p.reports.length} time${p.reports.length === 1 ? "" : "s"}${p.kid ? ` <span class="pill">🧸 Kiddy zone post</span>` : ""}</h3><ul class="report-reasons">${p.reports.map(r => `<li><strong>${safe(r.username)}</strong>: ${safe(r.reason)} <small>${timeLabel(r.createdAt)}</small></li>`).join("")}</ul>` +
+      `${postCard(p)}<div class="actions"><button class="danger" data-delete-post="${p.id}">🗑️ Delete the post</button><button class="soft" data-keep-post="${p.id}">✅ It's fine, keep it</button></div></section>`).join("")
+      || `<section class="panel empty">No reported posts right now. 🎉</section>`);
+  }
   function postCard(p) {
     const video = p.mediaType?.startsWith("video/");
-    return `<article class="panel post" data-post="${p.id}"><div class="posthead">${avatarHTML(p.avatar)}<div><strong>${safe(p.username)}</strong><br><small>${timeLabel(p.createdAt)}</small></div>${state.user && state.user.id !== p.userId ? `<button class="soft post-block" data-block="${p.userId}" data-name="${safe(p.username)}">🚫 Block</button>` : ""}</div>${postMedia(p)}<p>${safe(p.caption)}</p><div class="actions"><button class="soft" data-like="${p.id}" ${!state.user || state.user.id===p.userId?"disabled":""}>${p.liked?"💗 Liked":"🤍 Like"} · ${p.likes}</button>${video ? viewerTool("speed", "⏩", "Speed", p.id) + viewerTool("effects", "✨", "Effects", p.id) : ""}</div><div class="viewer">${video ? viewerPanel(p.id) : ""}</div></article>`;
+    const mine = state.user?.id === p.userId, who = `${avatarHTML(p.avatar)}<span><strong>${safe(p.username)}</strong><br><small>${timeLabel(p.createdAt)}</small></span>`;
+    const code = p.code && !p.inGroup ? `<p class="post-code">🔗 Code <code>${safe(p.code)}</code></p>` : "";
+    // Tapping who posted it opens their profile (yours opens your Profile page). Guests can't open profiles.
+    const author = !state.user ? `<span class="post-author">${who}</span>` : `<button class="post-author" ${mine ? `data-page="profile"` : `data-view-person="${p.userId}"`} title="See ${safe(p.username)}'s profile">${who}</button>`;
+    const badge = p.visibility && p.visibility !== "public" ? ` <span class="pill">${VISIBILITY.find(v => v[0] === p.visibility)[1]}</span>` : "";
+    return `<article class="panel post" data-post="${p.id}"><div class="posthead">${author}${badge}${state.user && state.user.id !== p.userId ? `<button class="soft post-block" data-block="${p.userId}" data-name="${safe(p.username)}">🚫 Block</button>` : ""}</div>${postMedia(p)}<p>${safe(p.caption)}</p>${p.description ? `<div class="post-desc clamped">${safe(p.description)}</div>${p.description.length > 150 || p.description.includes("\n") ? `<button class="link-btn" data-desc-toggle="${p.id}">…more</button>` : ""}` : ""}<div class="actions"><button class="soft" data-like="${p.id}" ${!state.user || state.user.id===p.userId?"disabled":""}>${p.liked?"💗 Liked":"🤍 Like"} · ${p.likes}</button>${state.user ? `<button class="soft" data-playlist="${p.id}" aria-pressed="${p.inPlaylist}">${p.inPlaylist ? "✓ In playlist" : "➕ Playlist"}</button>` : ""}${video ? viewerTool("speed", "⏩", "Speed", p.id) + viewerTool("effects", "✨", "Effects", p.id) : ""}${postTools(p)}</div><div class="viewer">${video ? viewerPanel(p.id) : ""}</div>${code}</article>`;
   }
   function render() {
     applyTheme();
+    syncMusic();
     wallet();
-    document.querySelectorAll(".nav").forEach(b => b.classList.toggle("active", b.dataset.page === state.page));
+    if (pageGone(state.page) || (state.page === "reports" && !state.user?.admin)) state.page = "feed";
+    if (state.page === "person" && !(state.user && state.person)) state.page = "friends";
+    document.querySelectorAll(".nav").forEach(b => { b.classList.toggle("active", b.dataset.page === state.page); b.hidden = pageGone(b.dataset.page) || (b.dataset.page === "reports" && !state.user?.admin); });
     friendsBadge();
     // In the 18+ zone, Kuchisake-onna takes the place of Nails.
     $('.nav[data-page="nails"]').textContent = zoneOn() ? "👹 Kuchisake-onna" : "💅 Nails";
     screamButton();
+    $("#cameraBtn").hidden = kidOn();
     stalk();
     let html = "";
     if (state.page === "feed") {
@@ -803,7 +1009,10 @@
       `<div class="feed">${state.posts.map(postCard).join("") || `<div class="panel empty">No posts yet. Sign in and share the first one! 🌸</div>`}</div>`;
     } else if (state.page === "create") {
       html = hero("Upload your moment", "Choose a video you already made or a photo. Yakimma does not record videos inside the website.", "CREATE A POST") +
-      `<section class="panel"><h2>Make a post</h2>${!state.user?`<p>Please sign in before posting.</p><button class="primary" id="openAuth">Sign in / Create account</button>`:`<form id="postForm"><label for="postType">Post type</label><select id="postType"><option value="video">Video</option><option value="photo">Photo</option><option value="text">Text only</option></select><label for="media">Choose an existing photo or video</label><input id="media" name="media" type="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,video/quicktime"><small>Maximum 100 MB per file in this starter. Uploads are stored on the server running this app.</small><label for="caption">Caption</label><textarea id="caption" maxlength="240" rows="3" required placeholder="Write something fun..."></textarea><div class="actions"><button class="primary" type="submit">Publish post ✨</button><button class="soft" type="button" data-page="feed">Cancel</button></div></form>`}</section>`;
+      `<section class="panel"><h2>Make a post</h2>${!state.user?`<p>Please sign in before posting.</p><button class="primary" id="openAuth">Sign in / Create account</button>`:`<form id="postForm"><label for="postType">Post type</label><select id="postType"><option value="video">Video</option><option value="photo">Photo</option><option value="text">Text only</option></select><label for="media">Choose an existing photo or video</label><input id="media" name="media" type="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,video/quicktime"><small>Maximum 100 MB per file in this starter. Uploads are stored on the server running this app.</small><label for="caption">Caption</label><textarea id="caption" maxlength="240" rows="3" required placeholder="Write something fun..."></textarea>` +
+        `<label for="description">Description <small>(optional)</small></label><textarea id="description" maxlength="2000" rows="5" placeholder="Tell people more about your post"></textarea>` +
+        `<fieldset class="visibility"><legend>Who can see it?</legend>${VISIBILITY.map(([id, label, about], i) => `<label class="vis-option"><input type="radio" name="visibility" value="${id}" ${i ? "" : "checked"}><span><strong>${label}</strong><small>${about}</small></span></label>`).join("")}</fieldset>` +
+        `<div class="actions"><button class="primary" type="submit">Publish post ✨</button><button class="soft" type="button" data-page="feed">Cancel</button></div></form>`}</section>`;
     } else if (state.page === "shop") {
       html = hero("The Yakimma Shop", "Your exact shop prices, paid with MeowCoin and LoveCards.", "SHOP & COLLECT") +
       `<section class="panel"><h2>Your wallet</h2><p>Every new person's first like on your post earns 10 MC. 1,000 MC = 1 LoveCard. Secret codes on the Codes page give MC and LC too.</p><p class="wallet">${state.user?`🐱 ${state.user.mc} MC · 💌 ${state.user.lc} LC`:"Sign in to see your wallet"}</p><button class="primary" id="exchange" ${!state.user||state.user.mc<1000?"disabled":""}>Exchange 1,000 MC → 1 LC</button></section><div class="shopgrid">${state.products.map(p=>`<article class="product"><div class="productart">${p.icon}</div><h3>${safe(p.name)}</h3><p class="muted-note">${safe(p.description)}</p><div class="row between"><span class="price">${priceLabel(p)}</span>${shopButton(p)}</div></article>`).join("")}</div>`;
@@ -817,10 +1026,18 @@
       html = nailsPage();
     } else if (state.page === "profile") {
       html = hero("Your Yakimma profile", "Your posts, wallet, and collection.", "MY PROFILE") +
-      `<section class="panel"><div class="posthead">${state.user?`<button class="avatar-edit" id="editAvatar" aria-label="Change profile picture">${avatarHTML(state.user.avatar,"big")}<span class="avatar-edit-badge" aria-hidden="true">✏️</span></button>`:avatarHTML(null,"big")}<div><h2 style="margin:0">${state.user?safe(state.user.username):"Guest"}</h2><small>${state.user?`🔢 Account number ${state.user.accountNumber}`:"Browsing as a guest"}</small></div></div>${state.user?`<div class="row"><span class="pill">🐱 ${state.user.mc} MC</span><span class="pill">💌 ${state.user.lc} LC</span><span class="pill">🎁 ${state.inventory.length} items</span><span class="pill">👯 ${state.social.friends.length} friend${state.social.friends.length===1?"":"s"}</span></div><div class="actions"><button class="soft" id="editAvatarBtn">🎨 Change picture</button><button class="danger" id="logout">Sign out</button></div>`:`<button class="primary" id="openAuth">Create account / Sign in</button>`}</section><section class="panel"><h3>My collection</h3>${state.inventory.length?[...state.products.filter(p=>state.inventory.includes(p.id)).map(p=>`${p.icon} ${safe(p.name)}`),...state.nailOptions.arts.filter(a=>a.item&&state.inventory.includes(a.item)).map(a=>`${a.icon} ${safe(a.name)} sticker`),...state.themes.filter(t=>t.gift&&state.inventory.includes(t.item)).map(t=>`${t.icon} ${safe(t.name)} theme`)].map(x=>`<span class="pill">${x}</span> `).join(""):`<p class="muted">Visit the shop to collect something cute.</p>`}</section>` +
-      (state.user ? `<section class="panel"><h3>My nails 💅</h3>${receivedGallery(3)}</section>` + myPostsSection() : "");
+      `<section class="panel"><div class="posthead">${state.user?`<button class="avatar-edit" id="editAvatar" aria-label="Change profile picture">${avatarHTML(state.user.avatar,"big")}<span class="avatar-edit-badge" aria-hidden="true">✏️</span></button>`:avatarHTML(null,"big")}<div><h2 style="margin:0">${state.user?safe(state.user.username):"Guest"}</h2><small>${state.user?`🔢 Account number ${state.user.accountNumber}`:"Browsing as a guest"}</small></div></div>${state.user?`<div class="row"><span class="pill">🐱 ${state.user.mc} MC</span><span class="pill">💌 ${state.user.lc} LC</span><span class="pill">🎁 ${state.inventory.length} items</span><span class="pill">👯 ${state.social.friends.length} friend${state.social.friends.length===1?"":"s"}</span>${identityPills(state.user)}${followPills(state.user.id, state.social.follows?.followers ?? 0, state.social.follows?.following ?? 0, state.user.username)}</div><div class="actions"><button class="soft" id="editAvatarBtn">🎨 Change picture</button><button class="soft" id="changeUsername">✏️ Change Username</button><button class="danger" id="logout">Sign out</button></div>`:`<button class="primary" id="openAuth">Create account / Sign in</button>`}</section><section class="panel"><h3>My collection</h3>${state.inventory.length?[...state.products.filter(p=>state.inventory.includes(p.id)).map(p=>`${p.icon} ${safe(p.name)}`),...state.nailOptions.arts.filter(a=>a.item&&state.inventory.includes(a.item)).map(a=>`${a.icon} ${safe(a.name)} sticker`),...state.themes.filter(t=>t.gift&&state.inventory.includes(t.item)).map(t=>`${t.icon} ${safe(t.name)} theme`)].map(x=>`<span class="pill">${x}</span> `).join(""):`<p class="muted">Visit the shop to collect something cute.</p>`}</section>` +
+      (state.user ? `<section class="panel"><h3>My nails 💅</h3>${receivedGallery(3)}</section>` + playlistSection() + myPostsSection() : "");
     } else if (state.page === "pictures") {
       html = picturesPage();
+    } else if (state.page === "post") {
+      html = postPage();
+    } else if (state.page === "person") {
+      html = personPage();
+    } else if (state.page === "reports") {
+      html = reportsPage();
+    } else if (state.page === "learn") {
+      html = learnPage();
     } else if (state.page === "about") {
       html = aboutPage();
     } else if (state.page === "ads") {
@@ -830,14 +1047,24 @@
     }
     $("#main").innerHTML = notice() + html;
     applySpeeds();
+    watchPeople();
     const log = $("#chatLog");
     if (log) log.scrollTop = log.scrollHeight;
   }
   // ---- 18+ zone 🔞: turned on in Settings after a few checks. The server keeps the zone's posts, groups and chats apart. ----
   const zoneOn = () => Boolean(state.user?.adult?.on);
+  const kidOn = () => Boolean(state.user?.kid?.on);
+  // Pages guests don't see, pages that aren't in the 18+ zone or the kiddy zone, and pages that are only in the kiddy
+  // zone: they leave the menu, and links to them say so instead of opening them.
+  const GUEST_GONE = ["pictures", "settings", "codes", "reports"], ZONE_GONE = ["shop", "codes", "about", "ads"];
+  const KID_GONE = ["pictures", "groups", "codes", "about", "ads", "reports"], KID_ONLY = ["learn"];
+  const pageGone = page => (!state.user && GUEST_GONE.includes(page)) || (zoneOn() && ZONE_GONE.includes(page)) || (kidOn() ? KID_GONE.includes(page) : KID_ONLY.includes(page));
+  const goneNote = page => !state.user && GUEST_GONE.includes(page) ? `🔐 Sign in to use ${PAGE_NAMES[page]}.`
+    : kidOn() ? `🧸 ${PAGE_NAMES[page]} isn't in the kiddy zone.` : KID_ONLY.includes(page) ? `🧸 ${PAGE_NAMES[page]} is only in the kiddy zone.`
+    : `🔞 ${PAGE_NAMES[page]} isn't in the 18+ zone. Turn 18+ off in ⚙️ Settings to use it.`;
   // Turning the zone on or off changes what you see everywhere, so everything is loaded again.
   async function zoneChanged(user) {
-    Object.assign(state, { user, chat: null, groupView: null, salon: null, groups: null, myPosts: null, kuchi: null });
+    Object.assign(state, { user, chat: null, groupView: null, salon: null, groups: null, myPosts: null, playlist: null, kuchi: null, learn: null, person: null, friendSearch: null, people: null });
     await refresh();
     await loadPageData();
     render();
@@ -886,7 +1113,7 @@
       const btn = $("#faceStart");
       btn.disabled = true; fail({ message: "" });
       try {
-        await enteredZone(await api("/api/adult/face", send("POST", { age: await faceScan() })));
+        await enteredZone(await api("/api/adult/face", send("POST", { age: (await faceScan()).age })));
       } catch (err) {
         // A closed pop-up stops the scan, and there's nothing left to show the error in.
         if ($("#faceStart")) { fail(err); btn.disabled = false; btn.textContent = "📷 Try again"; }
@@ -900,6 +1127,165 @@
     };
     if (step !== "face") $("#modalroot input")?.focus();
   }
+  // ---- Kiddy zone 🧸: a zone for kids that a parent turns on in Settings. The server keeps its posts and chats apart,
+  // and only the parent password turns it off. ----
+  async function enteredKidZone(d) {
+    closeModal();
+    await zoneChanged(d.user);
+    toast("Welcome to the kiddy zone 🧸 Have fun!");
+  }
+  // The steps in a pop-up: confirm, the parent's email, the code sent to it, the parent password, the parent's face, then
+  // the child's and the parent's birth dates. Once a parent has set it up, turning it back on only needs the confirm (and
+  // the birth dates, if it was set up before they were asked for). A forgotten password (`reset`) starts at the email
+  // step, and the code goes to the parent's email.
+  function kidModal(step, info = {}) {
+    const ready = state.user.kid.ready, reset = Boolean(info.reset), number = { confirm: 1, email: 2, code: 3, password: 4, face: 5, born: 6 }[step];
+    const today = new Date().toLocaleDateString("en-CA"), bornBack = Boolean(info.password);
+    // A first setup offers the parent face scan (they can skip it). A new password keeps whatever face is saved.
+    const offerFace = !reset;
+    const body = {
+      confirm: `<p>The kiddy zone is a safe part of Yakimma for kids. In it you only see posts made in the kiddy zone, you can only add and talk to friends who are in it too, and you only have Feed, Profile, Settings, Friends, Nails, Learn and the Shop.</p>` +
+        `<p><strong>Once it's on, only a parent can turn it off or sign out.</strong>${ready ? "" : " A parent needs to do the next steps."}</p><div class="actions"><button class="primary" id="kidYes">${ready ? "Turn on the kiddy zone" : "I'm a parent, let's set it up"}</button><button class="soft" id="kidCancel">Cancel</button></div>`,
+      email: reset
+        ? `<p>We'll email a code to the parent who set up the kiddy zone. With it they can choose a new parent password.</p><div class="actions"><button class="primary" id="kidSend">Send the code</button></div>`
+        : `<p>Parent: type your email and we'll send you a 6-digit code.</p><form id="kidEmailForm"><label for="kidEmail">Parent's email</label><input id="kidEmail" type="email" autocomplete="email" maxlength="254" required><div class="actions"><button class="primary" type="submit">Send the code</button></div></form>`,
+      code: `<p>${info.testCode ? `Email isn't set up on this computer, so here's the code instead: <strong class="code-tag">${safe(info.testCode)}</strong>` : `We sent a code to ${reset ? "the parent's email" : `<strong>${safe(info.email)}</strong>`}. It works for 10 minutes.`}</p>` +
+        `<form id="kidCodeForm"><label for="kidCode">6-digit code</label><input id="kidCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required><div class="actions"><button class="primary" type="submit">Check the code</button><button class="soft" type="button" id="kidBack">${reset ? "Send a new code" : "Use another email"}</button></div></form>`,
+      password: `<p>Parent: choose a ${reset ? "new " : ""}parent-only password. Only this password can turn the kiddy zone off, so keep it secret.</p>` +
+        `<form id="kidPassForm"><label for="kidPass">Parent password</label><input id="kidPass" type="password" autocomplete="new-password" minlength="6" maxlength="200" required><label for="kidPass2">Type it again</label><input id="kidPass2" type="password" autocomplete="new-password" minlength="6" maxlength="200" required>` +
+        `<div class="actions"><button class="primary" type="submit">${offerFace ? "Next" : "Save the new password"}</button></div></form>`,
+      face: `<p>You can skip this step. Parent: scan your face so you can sign out of the kiddy zone with your face as well as the parent password. You can also do it later in ⚙️ Settings.</p>${faceBox()}` +
+        `<div class="actions"><button class="primary" id="faceStart">📷 Scan the parent's face</button><button class="soft" id="kidSkipFace">Skip the face scan</button></div>`,
+      born: `<p>${ready || reset ? "" : "Last step. "}Parent: fill in both birth dates. The kiddy zone can't be turned on without them.</p>` +
+        `<form id="kidBornForm"><label for="childBirth">Child's birth date</label><input id="childBirth" type="date" min="1900-01-01" max="${today}" required>` +
+        `<label for="parentBirth">Parent's birth date</label><input id="parentBirth" type="date" min="1900-01-01" max="${today}" required>` +
+        `<p class="muted-note">🔒 This information will not be shared.</p>` +
+        `<div class="actions"><button class="primary" type="submit">${reset ? "Save" : "Turn on the kiddy zone"}</button>${bornBack ? `<button class="soft" type="button" id="kidBornBack">← Back</button>` : ""}</div></form>`
+    }[step];
+    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="kidTitle"><div class="row between"><h2 id="kidTitle">🧸 ${reset ? "New parent password" : "Turn on the kiddy zone"}</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
+      `${ready || reset ? "" : `<p class="pill">Step ${number} of 6</p>`}${body}<p class="muted-note error-text" id="kidError" role="alert"></p></section></div>`;
+    const fail = err => { if ($("#kidError")) $("#kidError").textContent = err.message; };
+    $("#closeModal").onclick = closeModal;
+    $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
+    if (step === "confirm") {
+      $("#kidCancel").onclick = closeModal;
+      $("#kidYes").onclick = async () => {
+        if (!ready) return kidModal("email");
+        if (!state.user.kid.birthDates) return kidModal("born");
+        try { await enteredKidZone(await api("/api/kid", send("PUT", { on: true }))); } catch (err) { fail(err); }
+      };
+    }
+    // With `reset`, the server sends the code to the parent's email, so no email is given.
+    const sendCode = async email => {
+      try { const d = await api("/api/kid/email", send("POST", { email })); kidModal("code", { reset, email, testCode: d.testCode }); } catch (err) { fail(err); }
+    };
+    if (step === "email" && reset) $("#kidSend").onclick = () => sendCode();
+    if (step === "email" && !reset) $("#kidEmailForm").onsubmit = e => { e.preventDefault(); sendCode($("#kidEmail").value.trim()); };
+    if (step === "code") {
+      $("#kidBack").onclick = () => kidModal("email", { reset });
+      $("#kidCodeForm").onsubmit = async e => {
+        e.preventDefault();
+        try { await api("/api/kid/code", send("POST", { code: $("#kidCode").value })); kidModal("password", { reset }); } catch (err) { fail(err); }
+      };
+    }
+    const save = async body => {
+      const d = await api("/api/kid/password", send("POST", body));
+      if (!reset) return enteredKidZone(d);
+      closeModal(); state.user = d.user; toast("The new parent password is saved 🔐");
+    };
+    if (step === "password") $("#kidPassForm").onsubmit = async e => {
+      e.preventDefault();
+      const password = $("#kidPass").value;
+      if (password !== $("#kidPass2").value) return fail({ message: "The two passwords aren't the same. Type them again." });
+      if (offerFace) return kidModal("face", { reset, password });
+      if (!state.user.kid.birthDates) return kidModal("born", { reset, password });
+      try { await save({ password }); } catch (err) { fail(err); }
+    };
+    // The face scan (if they do it) is saved with the birth dates, on the last step.
+    if (step === "face") $("#faceStart").onclick = async () => {
+      const btn = $("#faceStart");
+      btn.disabled = true; fail({ message: "" });
+      try { const { age, face } = await faceScan(true); kidModal("born", { password: info.password, face, age }); }
+      catch (err) { if ($("#faceStart")) { fail(err); btn.disabled = false; btn.textContent = "📷 Try again"; } }
+    };
+    if (step === "face") $("#kidSkipFace").onclick = () => { stopCamera(); kidModal("born", { password: info.password }); };
+    // The birth dates come after the face scan in a first setup, after the new password for a reset, or on their own
+    // when an account set up before they were asked for goes back in.
+    if (step === "born") {
+      if (bornBack) $("#kidBornBack").onclick = () => reset ? kidModal("password", { reset }) : kidModal("face", { password: info.password });
+      $("#kidBornForm").onsubmit = async e => {
+        e.preventDefault();
+        const dates = { childBirthDate: $("#childBirth").value, parentBirthDate: $("#parentBirth").value };
+        try { info.password ? await save({ password: info.password, face: info.face, age: info.age, ...dates }) : await enteredKidZone(await api("/api/kid", send("PUT", { on: true, ...dates }))); }
+        catch (err) { fail(err); }
+      };
+    }
+    if (step !== "face") $("#modalroot input")?.focus();
+  }
+  const faceBox = () => `<div class="face-box"><video id="faceVideo" playsinline muted></video><div class="face-ring" aria-hidden="true"></div></div>` +
+    `<p class="muted-note" id="faceStatus" role="status">The scan happens on this device and the camera picture is never saved. Yakimma only keeps numbers that describe the parent's face, to recognise it.</p>`;
+  // Only a parent can sign out of the kiddy zone, with the parent password or (if one is saved) their face.
+  function kidSignOut() {
+    askParent("🧸 Sign out", `Only a parent can sign out of the kiddy zone. Parent: type the parent password${state.user.kid.face ? " or scan your face" : ""}.`, async proof => {
+      await api("/api/logout", send("POST", proof));
+      closeModal(); await signedOut();
+    }, { face: true });
+  }
+  // Saving the parent's face (a new one, or the first one if they skipped it), with the parent password.
+  function kidFaceModal() {
+    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="kidTitle"><div class="row between"><h2 id="kidTitle">🧸 Save the parent's face</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
+      `<p>Parent: type the parent password, then scan your face. After that you can sign out of the kiddy zone with your face as well as the parent password.</p>` +
+      `<label for="kidFacePass">Parent password</label><input id="kidFacePass" type="password" autocomplete="current-password" maxlength="200">` +
+      `${faceBox()}<div class="actions"><button class="primary" id="faceStart">📷 Scan the parent's face</button></div><p class="muted-note error-text" id="kidError" role="alert"></p></section></div>`;
+    const fail = err => { if ($("#kidError")) $("#kidError").textContent = err.message; };
+    $("#closeModal").onclick = closeModal;
+    $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
+    $("#faceStart").onclick = async () => {
+      const btn = $("#faceStart"), password = $("#kidFacePass").value;
+      if (!password) return fail({ message: "Type the parent password first." });
+      btn.disabled = true; fail({ message: "" });
+      try {
+        const { age, face } = await faceScan(true);
+        const d = await api("/api/kid/face", send("PUT", { password, face, age }));
+        closeModal(); state.user = d.user; toast("The parent's face is saved 🔐");
+      } catch (err) {
+        if ($("#faceStart")) { fail(err); btn.disabled = false; btn.textContent = "📷 Try again"; }
+      }
+    };
+    $("#kidFacePass").focus();
+  }
+  // Changing your username: only the capital letters (free), or a whole new one (state.usernameCost MC).
+  function usernameModal(whole) {
+    const u = state.user, cost = state.usernameCost;
+    const body = whole === undefined
+      ? `<p>What do you want to change?</p><div class="grade-list"><button class="soft" data-username-mode="case">🔠 Change Capitalization? <small>Free</small></button>` +
+        `<button class="soft" data-username-mode="whole">✨ Change Whole Username? <small>${cost} MC · you have ${u.mc} MC</small></button></div>`
+      : `<p>${whole ? `A whole new username costs <strong>${cost} MC</strong>. You can't copy someone else's username.` : `Change which letters are capitals, like <strong>${safe(u.username.toLowerCase())}</strong> to <strong>${safe(u.username[0].toUpperCase() + u.username.slice(1).toLowerCase())}</strong>. It's free.`}</p>` +
+        `<form id="usernameForm"><label for="newUsername">New username</label><input id="newUsername" maxlength="20" autocomplete="off" required value="${whole ? "" : safe(u.username)}">` +
+        `<p class="muted-note">Only letters and numbers, 3 to 20 of them, with no spaces.</p><div class="actions"><button class="primary" type="submit">${whole ? `Change it for ${cost} MC` : "Change it"}</button><button class="soft" type="button" id="usernameBack">← Back</button></div></form>`;
+    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="usernameTitle"><div class="row between"><h2 id="usernameTitle">✏️ Change Username</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
+      `${body}<p class="muted-note error-text" id="usernameError" role="alert"></p></section></div>`;
+    $("#closeModal").onclick = closeModal;
+    $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
+    for (const btn of document.querySelectorAll("[data-username-mode]")) btn.onclick = () => usernameModal(btn.dataset.usernameMode === "whole");
+    if (whole === undefined) return;
+    $("#usernameBack").onclick = () => usernameModal();
+    $("#usernameForm").onsubmit = async e => {
+      e.preventDefault();
+      try {
+        const d = await api("/api/me/username", send("PUT", { username: $("#newUsername").value.trim(), whole }));
+        closeModal(); state.user = d.user;
+        toast(`Your username is now ${d.user.username}! ✏️${whole ? ` (${cost} MC)` : ""}`);
+      } catch (err) { $("#usernameError").textContent = err.message; }
+    };
+    $("#newUsername").focus();
+  }
+  async function signedOut() {
+    Object.assign(state, { groupView: null, chat: null, myPosts: null, playlist: null, pictures: null, learn: null, person: null, friendSearch: null, people: null });
+    await refresh();
+    state.page = "feed";
+    toast("You're signed out. See you soon! 👋");
+  }
   // The face scan's library (with its models) is only downloaded when someone starts a scan.
   let faceLib = null, faceStream = null;
   const loadFaceLib = () => faceLib ||= new Promise((resolve, reject) => {
@@ -912,9 +1298,16 @@
     await Promise.all([faceapi.nets.tinyFaceDetector.loadFromUri("/vendor/face-model"), faceapi.nets.ageGenderNet.loadFromUri("/vendor/face-model")]);
     return faceapi;
   }).catch(err => { faceLib = null; throw err; });
+  // Recognising a face (the kiddy zone's parent) needs two more models, only downloaded the first time.
+  let faceRecLib = null;
+  const loadFaceRecognition = () => faceRecLib ||= loadFaceLib().then(async faceapi => {
+    await Promise.all([faceapi.nets.faceLandmark68Net.loadFromUri("/vendor/face-model"), faceapi.nets.faceRecognitionNet.loadFromUri("/vendor/face-model")]);
+    return faceapi;
+  }).catch(() => { faceRecLib = null; throw new Error("The face scan couldn't start. Check your connection and try again."); });
   const stopCamera = () => { faceStream?.getTracks().forEach(t => t.stop()); faceStream = null; };
   // Looks for your face a few times a second and keeps 10 guesses of your age. The middle guess is the answer.
-  async function faceScan() {
+  // With `recognize`, it also gives `face`: 128 numbers that describe the face, averaged over the 10 looks.
+  async function faceScan(recognize = false) {
     const say = text => { const el = $("#faceStatus"); if (!el) throw new Error("closed"); el.textContent = text; };
     say("Getting the camera ready…");
     try { faceStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, audio: false }); }
@@ -925,18 +1318,316 @@
       video.srcObject = faceStream;
       await video.play();
       say("Getting the face scan ready…");
-      const faceapi = await loadFaceLib(), options = new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 }), ages = [];
+      const faceapi = await (recognize ? loadFaceRecognition() : loadFaceLib()), options = new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 }), ages = [], looks = [];
       for (let tries = 0; ages.length < 10 && tries < 100; tries++) {
         if (!$("#faceVideo")) throw new Error("closed");
-        const face = await faceapi.detectSingleFace(video, options).withAgeAndGender();
-        if (face) ages.push(face.age);
+        const found = faceapi.detectSingleFace(video, options);
+        const face = await (recognize ? found.withFaceLandmarks().withAgeAndGender().withFaceDescriptor() : found.withAgeAndGender());
+        if (face) { ages.push(face.age); if (recognize) looks.push(face.descriptor); }
         say(face ? `Scanning… ${ages.length * 10}%` : "Can't see your face. Look straight at the camera, somewhere bright.");
         await new Promise(r => setTimeout(r, 150));
       }
       if (ages.length < 10) throw new Error("The face scan couldn't see your face well enough. Try again somewhere brighter.");
       say("Done!");
-      return ages.sort((a, b) => a - b)[ages.length >> 1];
+      const face = recognize ? Array.from(looks[0], (_, i) => looks.reduce((sum, look) => sum + look[i], 0) / looks.length) : null;
+      return { age: ages.sort((a, b) => a - b)[ages.length >> 1], face };
     } finally { stopCamera(); }
+  }
+
+  // ---- Learn! 📚: a quiz game in the kiddy zone, 10 questions a round. For each subject a parent chooses the class
+  // (1 to 9) and where the child is from with the parent password, and Islam opens once a parent verifies. The server
+  // keeps those choices (state.learnData); the quizzes are made here. ----
+  const LEARN_SUBJECTS = [
+    { id: "math", name: "Math", icon: "➗" },
+    { id: "english", name: "English", icon: "🔤" },
+    { id: "science", name: "Science", icon: "🔬" },
+    // Faith subjects (with `who`) only open for accounts of that religion, once a parent verifies them with the parent
+    // password.
+    { id: "islam", name: "Islam", icon: "☪️", who: "a Muslim", note: "(If You are a Muslim Verify By a Parent)" },
+    { id: "christianity", name: "Christianity", icon: "✝️", who: "a Christian", note: "(If You are a Christian Verify By a Parent)" }
+  ];
+  const REGION_NAMES = { asia: "🌏 Asia", western: "🌍 Western" }, QUIZ_LENGTH = 10;
+  // Names and things for questions, from the child's region.
+  const LEARN_NAMES = { asia: ["Ayesha", "Rahim", "Fatima", "Arif", "Nadia", "Karim"], western: ["Emma", "Jack", "Olivia", "Noah", "Mia", "Leo"] };
+  const LEARN_THINGS = { asia: ["mangoes", "bananas", "lychees"], western: ["apples", "cookies", "strawberries"] };
+  const levelLabel = l => `Class ${l.grade} · ${REGION_NAMES[l.region]}`;
+  const pick = list => list[Math.floor(Math.random() * list.length)];
+  const rnd = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
+  const shuffle = list => { const a = [...list]; for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+  const num = n => (n < 0 ? "−" : "") + (Number.isInteger(n) ? Math.abs(n) : Math.abs(n).toFixed(1));
+  // Three wrong answers near the right one (`step` apart), never below zero unless the answer is.
+  function nearby(answer, step = 1) {
+    const wrong = new Set();
+    while (wrong.size < 3) {
+      const w = Math.round((answer + pick([-3, -2, -1, 1, 2, 3, 10, -10]) * step) * 10) / 10;
+      if (w !== answer && (w >= 0 || answer < 0)) wrong.add(w);
+    }
+    return [...wrong];
+  }
+  const LEARN_EMOJI = { asia: ["🥭", "🍌", "⭐"], western: ["🍎", "🍪", "⭐"] };
+  // Money for questions: Asia uses taka and poisha, Western uses dollars and pennies (100 make 1 of the big ones).
+  const LEARN_MONEY = { asia: { one: "taka", many: "taka", coins: "poisha" }, western: { one: "dollar", many: "dollars", coins: "pennies" } };
+  const clockTime = (h, m) => `${h}:${String(m).padStart(2, "0")}`;
+  // A clock face showing h:m, for reading the time. Both hands stop short of the numbers so they stay easy to read.
+  function clockSVG(h, m) {
+    const at = (deg, r) => { const a = (deg - 90) * Math.PI / 180; return [(60 + r * Math.cos(a)).toFixed(1), (60 + r * Math.sin(a)).toFixed(1)]; };
+    const line = (deg, from, to, cls) => { const [x1, y1] = at(deg, from), [x2, y2] = at(deg, to); return `<line class="${cls}" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`; };
+    const ticks = Array.from({ length: 60 }, (_, i) => line(i * 6, i % 5 ? 52 : 48, 55, i % 5 ? "tick" : "tick five")).join("");
+    const numbers = Array.from({ length: 12 }, (_, i) => { const [x, y] = at((i + 1) * 30, 40); return `<text x="${x}" y="${y}">${i + 1}</text>`; }).join("");
+    return `<svg class="learn-clock" viewBox="0 0 120 120" role="img" aria-label="A clock"><circle class="face" cx="60" cy="60" r="56"/>${ticks}${numbers}` +
+      `${line(h % 12 * 30 + m / 2, 0, 22, "hour")}${line(m * 6, 0, 33, "minute")}<circle class="pin" cx="60" cy="60" r="3"/></svg>`;
+  }
+  // A clock to read, on the 5-minute marks. The wrong answers are the usual mistakes: mixing up the hands, reading the
+  // number the minute hand points to as the minutes, and an hour off.
+  function clockQuestion() {
+    const h = rnd(1, 12), m = 5 * rnd(0, 11), right = clockTime(h, m);
+    const wrongs = new Set([clockTime(m / 5 || 12, h * 5 % 60), clockTime(h, m / 5), clockTime(h % 12 + 1, m)]);
+    wrongs.delete(right);
+    while (wrongs.size < 3) { const w = clockTime(rnd(1, 12), 5 * rnd(0, 11)); if (w !== right) wrongs.add(w); }
+    return { q: "What time does the clock show?", pic: clockSVG(h, m), right, wrongs: [...wrongs].slice(0, 3) };
+  }
+  // One made-up Math question for a class. Each kind gives [question, answer, the step between wrong answers], or
+  // { q, right, wrongs } when the answers aren't numbers (and `pic` for a picture). Classes 1 and 2 are different for
+  // each region. Class 1: Asia learns times tables 1 to 10 and hard sums; Western learns odd and even, simple sums and
+  // counting from 1 to 120. Class 2: Asia learns times tables 3 to 15, 3-digit sums and multiplying, money, meters and
+  // centimeters, and clocks; Western learns hundreds, tens and ones, money, and clocks. Clocks are read with the 5 times table.
+  function mathQuestion(grade, region) {
+    const name = pick(LEARN_NAMES[region]), things = pick(LEARN_THINGS[region]), M = LEARN_MONEY[region];
+    const oneOf = (...makers) => () => pick(makers)();
+    const money = oneOf(
+      () => [`How many ${M.coins} make 1 ${M.one}?`, 100, 10],
+      () => { const a = rnd(1, 9), c = rnd(1, 99); return [`${a} ${a === 1 ? M.one : M.many} and ${c} ${M.coins} = how many ${M.coins}?`, a * 100 + c]; },
+      () => { const a = rnd(10, 50), b = rnd(5, 45); return [`${name} has ${a} ${M.coins} and gets ${b} more. How many ${M.coins} does ${name} have now?`, a + b]; },
+      () => { const p = rnd(5, 95); return [`A pencil costs ${p} ${M.coins}. ${name} pays with 1 ${M.one} (100 ${M.coins}). How many ${M.coins} change does ${name} get?`, 100 - p]; },
+      () => { const a = rnd(2, 40), b = rnd(2, 40); return [`${name} buys a toy for ${a} ${M.many} and a book for ${b} ${M.many}. How many ${M.many} is that altogether?`, a + b]; }
+    );
+    const clock = oneOf(
+      clockQuestion,
+      () => { const k = rnd(1, 11); return [`The minute hand points to ${k}. How many minutes past the hour is it? (Count in 5s!)`, k * 5, 5]; },
+      () => { const k = rnd(3, 11); return [`Count in 5s: ${(k - 2) * 5}, ${(k - 1) * 5}, __, ${(k + 1) * 5}`, k * 5, 5]; },
+      () => [`How many minutes are in 1 hour?`, 60, 10]
+    );
+    const measure = oneOf(
+      () => [`How many centimeters are in 1 meter?`, 100, 10],
+      () => { const m = rnd(1, 9), c = rnd(1, 99); return [`${m} m ${c} cm = how many cm?`, m * 100 + c]; },
+      () => { const m = rnd(2, 9); return [`A ribbon is ${m} meters long. How many centimeters is that?`, m * 100]; },
+      () => {
+        const cm = rnd(101, 999), m = Math.floor(cm / 100), c = cm % 100, say = (m, c) => `${m} m ${c} cm`, right = say(m, c);
+        const wrongs = new Set([say(c, m), say(m + 1, c), say(Math.floor(cm / 10), cm % 10), say(m, (c + 10) % 100)]);
+        wrongs.delete(right);
+        return { q: `${cm} cm = how many m and cm?`, right, wrongs: [...wrongs].slice(0, 3) };
+      }
+    );
+    // Hundreds, tens and ones, with three different digits so "the 3" always means one place.
+    const digits = () => shuffle([1, 2, 3, 4, 5, 6, 7, 8, 9]).slice(0, 3), join = ([a, b, c]) => a * 100 + b * 10 + c;
+    const mixedUp = d => shuffle([[d[0], d[2], d[1]], [d[1], d[0], d[2]], [d[1], d[2], d[0]], [d[2], d[0], d[1]], [d[2], d[1], d[0]]]).slice(0, 3).map(x => String(join(x)));
+    const placeValue = oneOf(
+      () => { const d = digits(), i = rnd(0, 2), worth = d[i] * [100, 10, 1][i]; return { q: `In ${join(d)}, what is the ${d[i]} worth?`, right: String(worth), wrongs: [d[i], d[i] * 10, d[i] * 100, d[i] * 1000].filter(w => w !== worth).map(String) }; },
+      () => {
+        const d = digits(), i = rnd(0, 2), spare = [1, 2, 3, 4, 5, 6, 7, 8, 9].find(n => !d.includes(n) && Math.random() < 0.5) || [1, 2, 3, 4, 5, 6, 7, 8, 9].find(n => !d.includes(n));
+        return { q: `In ${join(d)}, which digit is in the ${["hundreds", "tens", "ones"][i]} place?`, right: String(d[i]), wrongs: [...d.filter((_, j) => j !== i), spare].map(String) };
+      },
+      () => { const d = digits(); return { q: `Which number has ${d[0]} hundreds, ${d[1]} tens and ${d[2]} ones?`, right: String(join(d)), wrongs: mixedUp(d) }; },
+      () => { const d = digits(); return { q: `${d[0] * 100} + ${d[1] * 10} + ${d[2]} = ?`, right: String(join(d)), wrongs: mixedUp(d) }; }
+    );
+    const kinds = {
+      1: region === "asia" ? [
+        () => { const a = rnd(1, 10), b = rnd(1, 10); return [`${a} × ${b} = ?`, a * b]; },
+        () => { const a = rnd(1, 10), b = rnd(1, 10); return [`What is the missing number? ${a} × __ = ${a * b}`, b]; },
+        () => { const a = rnd(2, 10), b = rnd(2, 10); return [`${name} has ${a} bags with ${b} ${things} in each bag. How many ${things} is that?`, a * b]; },
+        () => { const a = rnd(25, 89), b = rnd(15, 89); return [`${a} + ${b} = ?`, a + b]; },
+        () => { const a = rnd(40, 99), b = rnd(11, a - 5); return [`${a} − ${b} = ?`, a - b]; }
+      ] : [
+        () => { const n = rnd(1, 120); return { q: `Is ${n} odd or even?`, right: n % 2 ? "Odd" : "Even", wrongs: [n % 2 ? "Even" : "Odd"] }; },
+        () => {
+          const even = Math.random() < 0.5, of = want => { let n; do n = rnd(1, 120); while ((n % 2 === 0) !== want); return n; };
+          const right = of(even), wrongs = new Set();
+          while (wrongs.size < 3) wrongs.add(of(!even));
+          return { q: `Which number is ${even ? "even" : "odd"}?`, right: String(right), wrongs: [...wrongs].map(String) };
+        },
+        () => { const a = rnd(0, 9), b = rnd(1, 10 - a); return [`${a} + ${b} = ?`, a + b]; },
+        () => { const a = rnd(2, 10), b = rnd(1, a); return [`${a} − ${b} = ?`, a - b]; },
+        () => { const n = rnd(1, 119); return [`What number comes after ${n}?`, n + 1]; },
+        () => { const n = rnd(2, 120); return [`What number comes before ${n}?`, n - 1]; },
+        () => { const n = rnd(1, 117); return [`What number is missing? ${n}, ${n + 1}, __, ${n + 3}`, n + 2]; },
+        () => { const n = rnd(3, 20), e = pick(LEARN_EMOJI[region]); return [`How many ${e} are there? ${e.repeat(n)}`, n]; }
+      ],
+      2: region === "asia" ? [
+        oneOf(
+          () => { const a = rnd(3, 15), b = rnd(1, 10); return [`${a} × ${b} = ?`, a * b]; },
+          () => { const a = rnd(3, 15), b = rnd(1, 10); return [`What is the missing number? ${a} × __ = ${a * b}`, b]; }),
+        () => { const a = rnd(101, 999), b = rnd(2, 9); return [`${a} × ${b} = ?`, a * b, 10]; },
+        oneOf(
+          () => { const a = rnd(100, 899), b = rnd(100, 899); return [`${a} + ${b} = ?`, a + b, 10]; },
+          () => { const a = rnd(300, 999), b = rnd(100, a - 50); return [`${a} − ${b} = ?`, a - b, 10]; }),
+        money, measure, clock
+      ] : [placeValue, money, clock],
+      3: [
+        () => { const a = rnd(2, 10), b = rnd(2, 10); return [`${a} × ${b} = ?`, a * b]; },
+        () => { const a = rnd(2, 10), b = rnd(2, 10); return [`${a * b} ÷ ${a} = ?`, b]; },
+        () => { const a = rnd(2, 6), b = rnd(3, 9); return [`${name} has ${a} bags with ${b} ${things} in each bag. How many ${things} is that?`, a * b]; }
+      ],
+      4: [
+        () => { const a = rnd(100, 600), b = rnd(100, 399); return [`${a} + ${b} = ?`, a + b]; },
+        () => { const a = rnd(300, 999), b = rnd(100, a); return [`${a} − ${b} = ?`, a - b]; },
+        () => { const a = rnd(11, 49), b = rnd(2, 9); return [`${a} × ${b} = ?`, a * b]; },
+        () => { const a = rnd(101, 989); return [`Round ${a} to the nearest 10.`, Math.round(a / 10) * 10, 10]; }
+      ],
+      5: [
+        () => { const d = pick([2, 3, 4, 5]), n = d * rnd(2, 10); return [`What is 1/${d} of ${n}?`, n / d]; },
+        () => { const n = 4 * rnd(2, 10); return [`What is 3/4 of ${n}?`, n * 3 / 4]; },
+        () => { const a = rnd(11, 59) / 10, b = rnd(11, 39) / 10; return [`${num(a)} + ${num(b)} = ?`, Math.round((a + b) * 10) / 10, 0.1]; },
+        () => { const w = rnd(3, 12), h = rnd(2, 9); return [`A rectangle is ${w} cm long and ${h} cm wide. What is its area in cm²?`, w * h]; }
+      ],
+      6: [
+        () => { const p = pick([10, 20, 25, 50]), n = pick([20, 40, 60, 80, 100, 120, 200]); return [`What is ${p}% of ${n}?`, n * p / 100]; },
+        () => { const a = rnd(2, 9), b = rnd(10, 20); return [`−${a} + ${b} = ?`, b - a]; },
+        () => { const a = rnd(2, 9), b = rnd(2, 9); return [`−${a} × ${b} = ?`, -a * b]; },
+        () => { const a = rnd(1, 3), b = a + rnd(1, 3), k = rnd(2, 6); return [`Share ${(a + b) * k} ${things} in the ratio ${a}:${b}. How many are in the bigger share?`, b * k]; }
+      ],
+      7: [
+        () => { const x = rnd(2, 20), a = rnd(2, 15); return [`Solve: x + ${a} = ${x + a}. What is x?`, x]; },
+        () => { const x = rnd(2, 12), a = rnd(2, 9); return [`Solve: ${a}x = ${a * x}. What is x?`, x]; },
+        () => { const a = rnd(2, 9), b = rnd(2, 9), c = rnd(2, 9); return [`${a} + ${b} × ${c} = ?`, a + b * c]; },
+        () => { const a = rnd(2, 9), b = rnd(2, 9), c = rnd(2, 9); return [`(${a} + ${b}) × ${c} = ?`, (a + b) * c]; }
+      ],
+      8: [
+        () => { const a = rnd(11, 20); return [`What is ${a}²?`, a * a]; },
+        () => { const a = rnd(4, 15); return [`What is √${a * a}?`, a]; },
+        () => { const x = rnd(2, 12), a = rnd(2, 9), b = rnd(1, 20); return [`Solve: ${a}x + ${b} = ${a * x + b}. What is x?`, x]; },
+        () => { const n = rnd(3, 8); return [`What is 2 to the power of ${n}?`, 2 ** n]; }
+      ],
+      9: [
+        () => { const x = rnd(1, 9), a = rnd(2, 6), b = rnd(1, 9); return [`Solve: ${a}(x + ${b}) = ${a * (x + b)}. What is x?`, x]; },
+        () => { const [p, q, r] = pick([[3, 4, 5], [5, 12, 13], [8, 15, 17]]), k = p === 3 ? rnd(1, 4) : 1; return [`A right-angled triangle's two short sides are ${p * k} cm and ${q * k} cm. How long is the longest side, in cm?`, r * k]; },
+        () => { const a = rnd(1, 9), b = rnd(1, 9); return [`(x + ${a})(x + ${b}) = x² + ?x + ${a * b}. Which number is the ?`, a + b]; },
+        () => { const a = rnd(4, 15); return [`If x² = ${a * a} and x is positive, what is x?`, a]; }
+      ]
+    };
+    const made = pick(kinds[grade])();
+    if (!Array.isArray(made)) return made;
+    const [q, answer, step = 1] = made;
+    return { q, right: num(answer), wrongs: nearby(answer, step).map(num) };
+  }
+  // English, Science, Islam and Christianity questions come from learn-questions.json, downloaded the first time they're needed.
+  let learnBank = null;
+  const loadLearnBank = () => learnBank ||= fetch("/learn-questions.json").then(r => { if (!r.ok) throw new Error(); return r.json(); })
+    .catch(() => { learnBank = null; throw new Error("The questions couldn't load. Check your connection and try again."); });
+  // Asia is harder and Western is easier in every subject: about half of each quiz comes from a level up (Asia) or a
+  // level down (Western), where there is one. Math Classes 1 and 2 already have their own Asia and Western questions,
+  // so for Math it's from Class 3 up.
+  const LEARN_BANDS = ["1", "4", "7"];
+  async function startQuiz(subject) {
+    const level = state.learnData.levels[subject], seen = new Map(), step = level.region === "asia" ? 1 : -1;
+    if (subject === "math") for (let tries = 0; seen.size < QUIZ_LENGTH && tries < 100; tries++) {
+      const grade = tries % 2 && level.grade >= 3 ? Math.min(9, level.grade + step) : level.grade, m = mathQuestion(grade, level.region);
+      seen.set(m.q + m.right, m);
+    }
+    else {
+      const bank = await loadLearnBank(), mine = Math.floor((level.grade - 1) / 3), other = Math.min(2, Math.max(0, mine + step));
+      const from = (band, n) => shuffle(bank[subject][LEARN_BANDS[band]].filter(q => !q[5] || q[5] === level.region)).slice(0, n);
+      const chosen = other === mine ? from(mine, QUIZ_LENGTH) : [...from(mine, QUIZ_LENGTH / 2), ...from(other, QUIZ_LENGTH / 2)];
+      for (const [q, right, ...wrongs] of shuffle(chosen)) seen.set(q + right, { q: q.replaceAll("{name}", pick(LEARN_NAMES[level.region])), right, wrongs: wrongs.slice(0, 3) });
+    }
+    const questions = [...seen.values()].map(item => ({ ...item, choices: shuffle([item.right, ...item.wrongs]) }));
+    state.learn.quiz = { subject, ...level, at: 0, score: 0, picked: null, questions };
+    render();
+  }
+  function learnPage() {
+    const top = hero("Learn! 📚", "Pick a subject and play a quiz made for your class.", "LEARN & PLAY"), L = state.learn ||= {};
+    if (L.quiz) return top + quizView(L.quiz);
+    if (L.subject) return top + subjectView(L.subject);
+    const card = s => {
+      const locked = learnLocked(s), level = state.learnData.levels[s.id];
+      const note = locked ? `🔒 Only if your religion is ${s.name}` : s.note && (state.learnData.verified.includes(s.id) ? "✅ Verified by a parent" : s.note);
+      return `<button class="learn-subject" data-learn-subject="${s.id}" ${locked ? "disabled" : ""}><span class="learn-icon" aria-hidden="true">${s.icon}</span><strong>${s.name}</strong>` +
+        `${note ? `<small>${note}</small>` : ""}${level ? `<small>${levelLabel(level)}</small>` : ""}</button>`;
+    };
+    return top + `<section class="panel"><h2>Which subject do you want to learn?</h2><div class="learn-subjects">${LEARN_SUBJECTS.map(card).join("")}</div></section>`;
+  }
+  function subjectView(id) {
+    const s = LEARN_SUBJECTS.find(x => x.id === id), level = state.learnData.levels[id];
+    const body = state.learn.unlocked === id
+      ? `<h3>Which class are you in?</h3><div class="grade-list">${Array.from({ length: 9 }, (_, i) => `<button class="${level?.grade === i + 1 ? "primary" : "soft"}" data-learn-grade="${i + 1}">Class ${i + 1}</button>`).join("")}</div>`
+      : level ? `<p>You're learning <strong>${levelLabel(level)}</strong>.</p><div class="actions"><button class="primary" data-learn-start>▶ Start the quiz</button><button class="soft" data-learn-unlock>🔒 Change class</button></div>`
+      : `<p>A parent chooses your class with the parent password.</p><button class="primary" data-learn-unlock>🔒 Choose your class</button>`;
+    return `<section class="panel"><div class="row between"><h2>${s.icon} ${s.name}</h2><button class="soft" data-learn-back>← Subjects</button></div>${body}</section>`;
+  }
+  function quizView(q) {
+    const s = LEARN_SUBJECTS.find(x => x.id === q.subject), title = `<h2>${s.icon} ${s.name} · Class ${q.grade}</h2>`, total = q.questions.length;
+    if (q.at >= total) {
+      const cheer = q.score === total ? "Perfect! 🏆" : q.score >= total * 0.8 ? "Great job! 🌟" : q.score >= total / 2 ? "Good work! Keep going 💪" : "Nice try! Play again to get better 🌱";
+      return `<section class="panel learn-quiz">${title}<p class="learn-score">You got ${q.score} out of ${total}! ${"⭐".repeat(Math.round(q.score / total * 3))}</p><p>${cheer}</p>` +
+        `<div class="actions"><button class="primary" data-learn-start>🔁 Play again</button><button class="soft" data-learn-back>← Back</button></div></section>`;
+    }
+    const item = q.questions[q.at], answered = q.picked !== null, gotIt = answered && item.choices[q.picked] === item.right;
+    return `<section class="panel learn-quiz"><div class="row between">${title}<small>Question ${q.at + 1} of ${total} · ⭐ ${q.score}</small></div><p class="learn-question">${safe(item.q)}</p>${item.pic || ""}` +
+      `<div class="learn-choices">${item.choices.map((c, i) => `<button class="learn-choice ${answered && c === item.right ? "right" : answered && i === q.picked ? "wrong" : ""}" data-learn-choice="${i}" ${answered ? "disabled" : ""}>${safe(c)}</button>`).join("")}</div>` +
+      (answered ? `<p class="learn-feedback" role="status">${gotIt ? "✅ Correct! Well done!" : `❌ Not quite. The answer is <strong>${safe(item.right)}</strong>.`}</p>` +
+        `<div class="actions"><button class="primary" data-learn-next>${q.at + 1 < total ? "Next →" : "See my score"}</button><button class="soft" data-learn-back>Stop</button></div>` : "") + `</section>`;
+  }
+  function learnModal(title, body) {
+    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="learnTitle"><div class="row between"><h2 id="learnTitle">${title}</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>${body}</section></div>`;
+    $("#closeModal").onclick = closeModal;
+    $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
+  }
+  // Asks a parent to prove it's them in a pop-up, then runs `submit` with the proof: { password }, or { face } when
+  // `face` is set and they scan their face instead (only if a parent face is saved). Mistakes show in the pop-up.
+  // Admins don't need either, so it runs straight away for them.
+  function askParent(title, text, submit, { face = false } = {}) {
+    if (state.user.admin) return submit({}).catch(err => toast(err.message, true));
+    const canFace = face && state.user.kid?.face;
+    const fail = err => { if ($("#parentError")) $("#parentError").textContent = err.message; else toast(err.message, true); };
+    const usePassword = () => {
+      $("#parentBody").innerHTML = `<form id="parentForm"><label for="parentPass">Parent password</label><input id="parentPass" type="password" autocomplete="current-password" maxlength="200" required>` +
+        `<div class="actions"><button class="primary" type="submit">OK</button>${canFace ? `<button class="soft" type="button" id="parentUseFace">📷 Use the parent's face instead</button>` : ""}</div></form>`;
+      $("#parentForm").onsubmit = async e => {
+        e.preventDefault();
+        try { await submit({ password: $("#parentPass").value }); } catch (err) { fail(err); }
+      };
+      if (canFace) $("#parentUseFace").onclick = useFace;
+      $("#parentPass").focus();
+    };
+    const useFace = () => {
+      $("#parentBody").innerHTML = `${faceBox()}<div class="actions"><button class="primary" id="faceStart">📷 Scan the parent's face</button><button class="soft" type="button" id="parentUsePassword">🔑 Use the password instead</button></div>`;
+      $("#parentUsePassword").onclick = () => { stopCamera(); fail({ message: "" }); usePassword(); };
+      $("#faceStart").onclick = async () => {
+        const btn = $("#faceStart");
+        btn.disabled = true; fail({ message: "" });
+        try { await submit({ face: (await faceScan(true)).face }); }
+        catch (err) { if ($("#faceStart")) { fail(err); btn.disabled = false; btn.textContent = "📷 Try again"; } }
+      };
+    };
+    learnModal(title, `<p>${text}</p><div id="parentBody"></div><p class="muted-note error-text" id="parentError" role="alert"></p>`);
+    usePassword();
+  }
+  const learnLocked = s => Boolean(s.who) && state.user.religion !== s.id;
+  function openLearnSubject(id) {
+    const open = () => { Object.assign(state.learn, { subject: id, unlocked: null }); render(); };
+    const s = LEARN_SUBJECTS.find(x => x.id === id);
+    if (learnLocked(s)) return toast(`${s.name} is only for accounts whose religion is ${s.name}.`, true);
+    if (!s.who || state.learnData.verified.includes(id)) return open();
+    askParent(`${s.icon} Verify by a parent`, `Parent: if your child is ${s.who}, type the parent password or scan your face to open ${s.name}.`, async proof => {
+      state.learnData = await api(`/api/learn/${id}/verify`, send("POST", proof));
+      closeModal(); open();
+    }, { face: true });
+  }
+  function unlockGrades() {
+    askParent("🔒 Choose your class", "Parent: type the parent password to choose the class.", async proof => {
+      await api("/api/kid/check", send("POST", proof));
+      closeModal(); state.learn.unlocked = state.learn.subject; render();
+    });
+  }
+  // After a class is picked: where the child is from, then the parent password to save both and start the quiz.
+  function regionModal(subject, grade) {
+    learnModal("Are you from?", `<div class="grade-list"><button class="soft" data-learn-region="asia">🌏 Asia?</button><button class="soft" data-learn-region="western">🌍 Western?</button></div>`);
+    for (const btn of document.querySelectorAll("[data-learn-region]")) btn.onclick = () => {
+      const region = btn.dataset.learnRegion;
+      askParent(REGION_NAMES[region], `Parent: type the parent password to confirm Class ${grade}, from ${region === "asia" ? "Asia" : "the West"}.`, async proof => {
+        state.learnData = await api(`/api/learn/${subject}`, send("PUT", { grade, region, ...proof }));
+        closeModal(); state.learn.unlocked = null; await startQuiz(subject);
+      });
+    };
   }
 
   // ---- Kuchisake-onna 👹: in the 18+ zone she takes the place of Nails. ----
@@ -1037,7 +1728,7 @@
     breath.connect(hiss).connect(tone);
     breath.start(t);
   }
-  const stopScream = () => { screamOut?.disconnect(); screamOut = null; };
+  const stopScream = () => { screamOut?.disconnect(); screamOut = null; window.speechSynthesis?.cancel(); };
 
   // ---- Hachishakusama 👒: make Kuchisake-onna scream 5 times and a very tall woman starts stalking you around the
   // 18+ zone. Now and then she peeks in from the side of the screen, and sometimes the site warns you, with a quiet
@@ -1102,40 +1793,79 @@
     setTimeout(() => note.remove(), 4800);
     poPoPo();
   }
-  // Her quiet "po… po… po…".
-  function poPoPo() {
-    const ctx = audioCtx();
-    if (screamOff || !ctx) return;
-    ctx.resume();
-    for (const at of [0.2, 0.95, 1.7]) po(ctx, ctx.currentTime + at, ctx.destination);
+  // Her quiet "po… po… po…", in a soft girl's voice. It's said by a Japanese woman's voice from the device's own speech
+  // voices, slowly, a little high and quietly, and each "po" trails off a bit. Devices without one get the made-up voice below.
+  const speech = window.speechSynthesis;
+  const PO_SPEECH = { volume: 0.45, rate: 0.75, pitch: 1.25 };
+  // Only voices that sound like a real young woman. Robotic voices and men's voices are never picked.
+  const PO_VOICES = [/kyoko/i, /o-ren/i, /日本語/, /nanami/i, /haruka/i, /ayumi/i, /sayaka/i, /mayu/i, /aoi/i, /shiori/i];
+  speech?.getVoices(); // Chrome only starts loading its voices once something asks for them.
+  function girlVoice() {
+    const ja = speech?.getVoices().filter(v => /^ja/i.test(v.lang)) || [];
+    for (const name of PO_VOICES) { const v = ja.find(v => name.test(v.name)); if (v) return v; }
+    return null;
   }
-  // One "po", like a low voice saying it: a little puff of air for the "p", then an "o" whose pitch slips down a bit.
-  // The "o" is pitched where phone and laptop speakers can play it, and PO_VOLUME keeps it quiet.
+  // iPhones only let a page speak after it has spoken once during a tap, so the first tap in the zone says nothing, silently.
+  let speechReady = false;
+  function wakeSpeech() {
+    if (speechReady || !speech) return;
+    speechReady = true;
+    const hush = new SpeechSynthesisUtterance(" ");
+    hush.volume = 0;
+    speech.speak(hush);
+  }
+  for (const type of ["pointerdown", "keydown"]) document.addEventListener(type, () => { if (zoneOn()) wakeSpeech(); });
+  function poPoPo() {
+    if (screamOff) return;
+    const voice = girlVoice(), ctx = voice ? null : audioCtx();
+    if (!voice && !ctx) return;
+    ctx?.resume();
+    [0.2, 0.95, 1.7].forEach((at, i) => voice
+      ? setTimeout(() => sayPo(voice, i), at * 1000)
+      : po(ctx, ctx.currentTime + at, ctx.destination));
+  }
+  function sayPo(voice, i) {
+    if (screamOff) return;
+    const word = new SpeechSynthesisUtterance("ぽ");
+    Object.assign(word, { voice, lang: voice.lang, rate: PO_SPEECH.rate, volume: PO_SPEECH.volume * (1 - i * 0.15), pitch: PO_SPEECH.pitch - i * 0.05 });
+    speech.speak(word);
+  }
+  // One made-up "po", like a girl breathing it: a little puff of air for the "p", then a soft, breathy "o" whose pitch
+  // slips down a bit. PO_VOLUME keeps it quiet.
   const PO_VOLUME = 0.8;
+  // `len` seconds of hiss, fading out when `fade` is set.
+  function hissOf(ctx, len, fade) {
+    const buf = ctx.createBuffer(1, Math.round(ctx.sampleRate * len), ctx.sampleRate), samples = buf.getChannelData(0);
+    for (let i = 0; i < samples.length; i++) samples[i] = (Math.random() * 2 - 1) * (fade ? 1 - i / samples.length : 1);
+    return buf;
+  }
   function po(ctx, t, to) {
     const out = ctx.createGain();
     out.gain.value = PO_VOLUME;
     out.connect(to);
-    const puff = ctx.createBufferSource(), air = ctx.createBuffer(1, Math.round(ctx.sampleRate * 0.03), ctx.sampleRate), puffTone = ctx.createBiquadFilter(), puffLoud = ctx.createGain();
-    const samples = air.getChannelData(0);
-    for (let i = 0; i < samples.length; i++) samples[i] = (Math.random() * 2 - 1) * (1 - i / samples.length);
-    puff.buffer = air; puffTone.type = "lowpass"; puffTone.frequency.value = 1200; puffLoud.gain.value = 0.25;
+    const puff = ctx.createBufferSource(), puffTone = ctx.createBiquadFilter(), puffLoud = ctx.createGain();
+    puff.buffer = hissOf(ctx, 0.03, true); puffTone.type = "lowpass"; puffTone.frequency.value = 1500; puffLoud.gain.value = 0.15;
     puff.connect(puffTone).connect(puffLoud).connect(out);
     puff.start(t);
-    // The vowel "o" is a buzzing voice with two of its notes made louder, around 480 and 850 Hz.
-    const voice = ctx.createOscillator(), shape = ctx.createGain(), low = ctx.createBiquadFilter(), high = ctx.createBiquadFilter(), highLoud = ctx.createGain();
-    voice.type = "sawtooth";
-    voice.frequency.setValueAtTime(185, t + 0.02);
-    voice.frequency.exponentialRampToValueAtTime(150, t + 0.36);
-    shape.gain.setValueAtTime(0.0001, t + 0.02);
-    shape.gain.exponentialRampToValueAtTime(1, t + 0.06);
-    shape.gain.exponentialRampToValueAtTime(0.0001, t + 0.38);
-    low.type = "bandpass"; low.frequency.value = 480; low.Q.value = 3;
-    high.type = "bandpass"; high.frequency.value = 850; high.Q.value = 4; highLoud.gain.value = 0.5;
+    // The vowel "o" is a soft voice at a girl's pitch mixed with a lot of breath, with the notes around 540 and 980 Hz
+    // made louder, which is where a woman's "o" rings.
+    const voice = ctx.createOscillator(), breath = ctx.createBufferSource(), breathLoud = ctx.createGain(), shape = ctx.createGain();
+    const low = ctx.createBiquadFilter(), high = ctx.createBiquadFilter(), highLoud = ctx.createGain();
+    const soft = Float32Array.from({ length: 16 }, (_, n) => n ? n ** -1.5 : 0);
+    voice.setPeriodicWave(ctx.createPeriodicWave(new Float32Array(16), soft));
+    voice.frequency.setValueAtTime(320, t + 0.03);
+    voice.frequency.exponentialRampToValueAtTime(275, t + 0.42);
+    breath.buffer = hissOf(ctx, 0.44); breathLoud.gain.value = 0.5;
+    shape.gain.setValueAtTime(0.0001, t + 0.03);
+    shape.gain.exponentialRampToValueAtTime(1, t + 0.09);
+    shape.gain.exponentialRampToValueAtTime(0.0001, t + 0.45);
+    low.type = "bandpass"; low.frequency.value = 540; low.Q.value = 2.5;
+    high.type = "bandpass"; high.frequency.value = 980; high.Q.value = 3; highLoud.gain.value = 0.45;
     voice.connect(shape);
+    breath.connect(breathLoud).connect(shape);
     shape.connect(low).connect(out);
     shape.connect(high).connect(highLoud).connect(out);
-    voice.start(t + 0.02); voice.stop(t + 0.4);
+    for (const s of [voice, breath]) { s.start(t + 0.03); s.stop(t + 0.47); }
   }
   // Her: far too tall for the screen, in a white dress and a wide white hat, with long black hair and a smile in the shadow.
   function hachiSVG() {
@@ -1166,7 +1896,7 @@
     s.onerror = () => { shotLib = null; s.remove(); reject(new Error("The camera couldn't start. Check your connection and try again.")); };
     document.head.append(s);
   });
-  const PAGE_NAMES = { feed: "🏡 Feed", create: "✨ Upload", profile: "🌷 Profile", pictures: "🌇 Pictures", settings: "⚙️ Settings", friends: "👯 Friends", groups: "🏘️ Groups", nails: "💅 Nail Salon", shop: "🛍️ Shop", codes: "👩‍💻 Codes", about: "🎀 About The Creator", ads: "🎉 Advertisement" };
+  const PAGE_NAMES = { feed: "🏡 Feed", create: "✨ Upload", profile: "🌷 Profile", pictures: "🌇 Pictures", settings: "⚙️ Settings", friends: "👯 Friends", groups: "🏘️ Groups", nails: "💅 Nail Salon", person: "👤 Profile", post: "🔗 Post", learn: "📚 Learn!", reports: "🚩 Reports", shop: "🛍️ Shop", codes: "👩‍💻 Codes", about: "🎀 About The Creator", ads: "🎉 Advertisement" };
   // Where a picture was taken, shown with it in Pictures.
   function placeName() {
     const c = state.chat, g = state.groupView?.group, client = state.page === "nails" && state.salon && salonClient();
@@ -1218,7 +1948,7 @@
   // A note from the person who made Yakimma, in her own words.
   function aboutPage() {
     return hero("About The Creator 🎀", "", "MEET THE CREATOR") +
-      `<section class="panel about"><p>Hello, My name is Mahdiya Faiza Manha I created this website and if you're wondering why is there 'Craftora Labs' in the link? well because its my dad's some sort of website I dont know so I build this with Claude Code in Terminal it's pretty easy I build this for the love of y'all Byeeee</p><p class="signature">- Luv by Mahdiya Faiza Manha</p></section>`;
+      `<section class="panel about"><p>Hello, My name is Mahdiya Faiza Manha I created this website and if you're wondering why is there 'Craftora Labs' in the link? well because its my dad's some sort of website I dont know so I build this with Claude Code in Terminal it's pretty easy it almost looks like Sekai lol I build this for the love of y'all Byeeee!!.</p><p class="signature">- Luv by Mahdiya Faiza Manha</p></section>`;
   }
   // Links chosen by the person who made Yakimma. They open in a new tab, and each button says which website it goes to.
   const ADS = [
@@ -1253,9 +1983,32 @@
   const EYE_OPEN = `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>`;
   const EYE_CLOSED = `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 10c2.5 3.5 6 5.5 10 5.5s7.5-2 10-5.5"/><path d="M4.6 13.3 3 15.6M9 15.2l-.8 2.7M15 15.2l.8 2.7M19.4 13.3l1.6 2.3"/></svg>`;
   const closeModal = () => { stopCamera(); $("#modalroot").innerHTML = ""; };
+  // ---- Religion and country 🌍: chosen when making an account, and shown on the profile for everyone to see. ----
+  const identityFields = () => `<label for="religion">Religion</label><select id="religion" required><option value="">Choose your religion</option>` +
+    (state.religions || []).map(r => `<option value="${r.id}">${r.icon} ${safe(r.name)}</option>`).join("") + `</select>` +
+    `<label for="country">Country</label><select id="country" required><option value="">Choose your country</option>` +
+    (state.countries || []).map(c => `<option value="${c.code}">${c.flag} ${safe(c.name)}</option>`).join("") + `</select>` +
+    `<p class="muted-note">🌍 Everyone can see your religion and country on your profile.</p>`;
+  const identityPills = u => [state.countries?.find(c => c.code === u.country), state.religions?.find(r => r.id === u.religion)]
+    .filter(Boolean).map(x => `<span class="pill">${x.flag || x.icon} ${safe(x.name)}</span>`).join("");
+  // Accounts made before religion and country were asked for choose them once. The pop-up can't be closed until they do.
+  function identityModal() {
+    if ($("#identityForm")) return;
+    $("#modalroot").innerHTML = `<div class="modalback"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="identityTitle"><h2 id="identityTitle">🌍 Your religion and country</h2>` +
+      `<p>Everyone on Yakimma chooses their religion and country. Choose yours to carry on.</p><form id="identityForm">${identityFields()}` +
+      `<p class="muted-note error-text" id="identityError" role="alert"></p><div class="actions"><button class="primary" type="submit">Save</button></div></form></section></div>`;
+    $("#identityForm").onsubmit = async e => {
+      e.preventDefault();
+      try {
+        const d = await api("/api/me/identity", send("PUT", { religion: $("#religion").value, country: $("#country").value }));
+        Object.assign(state, { user: d.user, songs: d.songs }); closeModal(); render(); toast("Saved! 🌍");
+      } catch (err) { $("#identityError").textContent = err.message; }
+    };
+    $("#religion").focus();
+  }
   function openAuth(startMode = "login") {
     $("#accountMenu")?.remove();
-    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="authTitle"><div class="row between"><h2 id="authTitle">🌸 Welcome to Yakimma</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div><p class="muted-note">Create a real local test account. Use a unique password you don't use anywhere else. This local starter is not yet a public website.</p><div class="row"><button type="button" id="tabLogin">Sign in</button><button type="button" id="tabSignup">Create account</button></div><form id="authForm"><label for="username">Username</label><input id="username" name="username" minlength="3" maxlength="20" autocomplete="username" required aria-describedby="usernameRules"><div class="notice error rules" id="usernameRules" role="note">⚠️ Do not copy usernames<br>⚠️ Do not use symbols<br>⚠️ Do not use spaces</div><label for="password" id="passwordLabel">Password</label><div class="password-wrap"><input id="password" name="password" type="password" maxlength="200" required aria-describedby="passwordRules"><button type="button" class="eye" id="togglePassword" aria-label="Show password" aria-pressed="false" title="Show password">${EYE_OPEN}</button></div><div class="notice error rules" id="passwordRules" role="note">⚠️ Do not use spaces</div><p id="authError" class="muted-note"></p><button class="primary" type="submit" style="width:100%">Sign in</button></form></section></div>`;
+    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="authTitle"><div class="row between"><h2 id="authTitle">🌸 Welcome to Yakimma</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div><div class="row"><button type="button" id="tabLogin">Sign in</button><button type="button" id="tabSignup">Create account</button></div><form id="authForm"><label for="username">Username</label><input id="username" name="username" minlength="3" maxlength="20" autocomplete="username" required aria-describedby="usernameRules"><div class="notice error rules" id="usernameRules" role="note">⚠️ Do not copy usernames<br>⚠️ Do not use symbols<br>⚠️ Do not use spaces</div><label for="password" id="passwordLabel">Password</label><input id="password" name="password" type="password" maxlength="200" required aria-describedby="passwordRules"><div class="notice error rules" id="passwordRules" role="note">⚠️ Do not use spaces</div><div id="signupIdentity">${identityFields()}</div><p id="authError" class="muted-note"></p><button class="primary" type="submit" style="width:100%">Sign in</button></form></section></div>`;
     let mode = startMode;
     const setMode = m => {
       mode = m;
@@ -1266,7 +2019,9 @@
       $("#password").autocomplete = signup ? "new-password" : "current-password";
       $("#password").minLength = signup ? 8 : 1;
       // The rules only apply to new accounts, so older accounts with other characters or spaces can still sign in.
-      $("#usernameRules").hidden = $("#passwordRules").hidden = !signup;
+      $("#usernameRules").hidden = $("#passwordRules").hidden = $("#signupIdentity").hidden = !signup;
+      // Religion and country are only for new accounts. Turned off, they don't stop signing in.
+      for (const el of $("#signupIdentity").querySelectorAll("select")) el.disabled = !signup;
       if (signup) {
         Object.assign($("#username"), { pattern: "[A-Za-z0-9]+", title: "Letters and numbers only. Do not use symbols or spaces." });
         Object.assign($("#password"), { pattern: "\\S+", title: "Do not use spaces in your password." });
@@ -1277,19 +2032,14 @@
     };
     setMode(mode);
     $("#tabSignup").onclick = () => setMode("signup"); $("#tabLogin").onclick = () => setMode("login");
-    $("#togglePassword").onclick = () => {
-      const field = $("#password"), show = field.type === "password", label = show ? "Hide password" : "Show password";
-      field.type = show ? "text" : "password";
-      Object.assign($("#togglePassword"), { innerHTML: show ? EYE_CLOSED : EYE_OPEN, title: label });
-      $("#togglePassword").setAttribute("aria-label", label); $("#togglePassword").setAttribute("aria-pressed", show);
-    };
     $("#closeModal").onclick = closeModal;
     $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
     $("#authForm").onsubmit = async e => {
       e.preventDefault();
       const username = $("#username").value.trim(), password = $("#password").value;
+      const identity = mode === "signup" ? { religion: $("#religion").value, country: $("#country").value } : {};
       try {
-        await api("/api/" + mode, send("POST", { username, password }));
+        await api("/api/" + mode, send("POST", { username, password, ...identity }));
         closeModal(); await refresh(); await loadPageData();
         toast(mode === "signup" ? `Welcome to Yakimma, ${state.user.username}! 🌸 Your account number is ${state.user.accountNumber}.` : `Welcome back, ${state.user.username}! 🩵`);
       }
@@ -1302,6 +2052,7 @@
     const o = state.avatarOptions, current = state.user.avatar, C = 480;
     let emoji = current.emoji, bg = current.bg, img = null, zoom = 1, ox = 0, oy = 0;
     $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal avatar-modal" role="dialog" aria-modal="true" aria-labelledby="avatarTitle"><div class="row between"><h2 id="avatarTitle">🎨 Your profile picture</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
+      (state.user.admin ? `<p class="notice">🛠️ You're an admin, so everyone sees 🛠️ as your picture. Only the background you pick here shows.</p>` : "") +
       `<div class="row"><button type="button" id="tabEmoji">🌷 Emoji avatar</button><button type="button" id="tabPhoto">📷 Photo</button></div>` +
       `<div id="emojiPane"><div class="avatar-preview" id="emojiPreview"></div><h3>Pick a character</h3><div class="emoji-grid">${o.emojis.map(e => `<button type="button" class="emoji-pick" data-av-emoji="${safe(e)}" aria-label="${safe(e)}">${safe(e)}</button>`).join("")}</div>` +
       `<h3>Background</h3><div class="chips">${o.backgrounds.map(b => `<button type="button" class="swatch" data-av-bg="${b.id}" style="--c:${b.css}" title="${safe(b.name)}" aria-label="${safe(b.name)} background"></button>`).join("")}</div>` +
@@ -1386,7 +2137,7 @@
   }
   function toggleAccountMenu() {
     if ($("#accountMenu")) return $("#accountMenu").remove();
-    $(".top-actions").insertAdjacentHTML("beforeend", `<div class="account-menu" id="accountMenu" role="menu"><div class="account-menu-head">${avatarHTML(state.user.avatar)}<div><strong>${safe(state.user.username)}</strong><small>🐱 ${state.user.mc} MC · 💌 ${state.user.lc} LC</small></div></div><button class="menu-item" role="menuitem" data-page="profile">🌷 My profile</button><button class="menu-item" role="menuitem" id="menuAvatar">🎨 Change picture</button><button class="menu-item signout" role="menuitem" id="logout">🚪 Sign out</button></div>`);
+    $(".top-actions").insertAdjacentHTML("beforeend", `<div class="account-menu" id="accountMenu" role="menu"><div class="account-menu-head">${avatarHTML(state.user.avatar)}<div><strong>${safe(state.user.username)}</strong><small>🐱 ${state.user.mc} MC · 💌 ${state.user.lc} LC</small></div></div><button class="menu-item" role="menuitem" data-page="profile">🌷 My profile</button><button class="menu-item" role="menuitem" id="menuAvatar">🎨 Change picture</button>${kidOn() && !state.user.admin ? `<p class="menu-note">🧸 In the kiddy zone, only a parent can sign out, from 🌷 My profile.</p>` : `<button class="menu-item signout" role="menuitem" id="logout">🚪 Sign out</button>`}</div>`);
     $("#accountMenu button").focus();
   }
   document.addEventListener("keydown", e => {
@@ -1406,7 +2157,9 @@
     const s = state.salon;
     try {
       if(b.dataset.page){
-        state.page=b.dataset.page;state.notice="";state.codeWin=null;state.groupView=null;state.chat=null;state.kuchi=null;render();
+        if(pageGone(b.dataset.page)){toast(goneNote(b.dataset.page),true);return;}
+        if(location.pathname!=="/")history.replaceState(null,"","/");
+        state.page=b.dataset.page;state.notice="";state.codeWin=null;state.groupView=null;state.chat=null;state.kuchi=null;state.learn=null;render();
         await loadPageData();render();
         return;
       }
@@ -1416,8 +2169,8 @@
       if(["editAvatar","editAvatarBtn","menuAvatar"].includes(b.id)){openAvatarEditor();return;}
       if(b.dataset.myOrder){state.myPosts={...state.myPosts,order:b.dataset.myOrder};await loadMyPosts();render();return;}
       if(b.id==="moreMyPosts"){b.disabled=true;await loadMyPosts(true);render();return;}
-      if(b.id==="logout"){await api("/api/logout",{method:"POST"});state.groupView=null;state.chat=null;state.myPosts=null;state.pictures=null;await refresh();state.page="feed";toast("You're signed out. See you soon! 👋");return;}
-      if(b.dataset.like){const d=await api(`/api/posts/${b.dataset.like}/like`,{method:"POST"});if(state.groupView)state.groupView.posts=d.posts;else state.posts=d.posts;state.user=d.user;state.notice=d.rewarded?"You earned 10 MC! 🐱":"";render();return;}
+      if(b.id==="logout"){if(kidOn()&&!state.user.admin)return kidSignOut();await api("/api/logout",{method:"POST"});await signedOut();return;}
+      if(b.dataset.like){const d=await api(`/api/posts/${b.dataset.like}/like`,{method:"POST"});if(state.groupView)state.groupView.posts=d.posts;else state.posts=d.posts;for(const theirs of [state.person?.posts.find(x=>x.id===Number(b.dataset.like)),state.playlist?.find(x=>x.id===Number(b.dataset.like)),state.single?.post?.id===Number(b.dataset.like)&&state.single.post])if(theirs){theirs.liked=d.liked;theirs.likes+=d.liked?1:-1;}state.user=d.user;state.notice=d.rewarded?"You earned 10 MC! 🐱":"";render();return;}
       if(b.id==="exchange"){const d=await api("/api/exchange",{method:"POST"});state.user=d.user;toast("Exchanged 1,000 MC for 1 LoveCard! 💌");return;}
       if(b.dataset.buy){
         let d;
@@ -1428,7 +2181,36 @@
       if(b.id==="aiChat"){await openAIChat();return;}
       if(b.id==="cameraBtn"){if(state.user)await takePicture();else openAuth("login");return;}
       if(b.id==="screamBtn"){screamOff=!screamOff;try{localStorage.setItem(SCREAM_KEY,screamOff?"off":"on");}catch{}if(screamOff)stopScream();screamButton();if(state.page==="nails")render();return;}
-      if(b.id==="adultStart"){adultModal("confirm");return;}
+      if(b.id==="adultStart"){if(!state.user.admin)return adultModal("confirm");await enteredZone(await api("/api/adult",send("PUT",{on:true})));return;}
+      if(b.id==="kidStart"){if(!state.user.admin)return kidModal("confirm");await enteredKidZone(await api("/api/kid",send("PUT",{on:true})));return;}
+      if(b.id==="kidOffAdmin"){const d=await api("/api/kid",send("PUT",{on:false}));await zoneChanged(d.user);toast("The kiddy zone is off. Welcome back! 🌸");return;}
+      if(b.id==="kidForgot"){kidModal("email",{reset:true});return;}
+      if(b.id==="kidFaceBtn"){kidFaceModal();return;}
+      if(b.id==="changeUsername"){usernameModal();return;}
+      if(b.dataset.viewPerson){await openPerson(Number(b.dataset.viewPerson));return;}
+      if(b.dataset.postVisibility){visibilityModal(Number(b.dataset.postVisibility));return;}
+      if(b.dataset.descToggle){const d=b.previousElementSibling;b.textContent=d.classList.toggle("clamped")?"…more":"Show less";return;}
+      if(b.dataset.copyLink){const who={public:"Anyone can open it.",unlisted:"Only your friends on Yakimma can open it.",private:"Only you can open it."}[b.dataset.visibility]||"";try{await navigator.clipboard.writeText(postLink(b.dataset.copyLink));toast(`The link is copied. ${who} 🔗`);}catch{toast(`Copy this link: ${postLink(b.dataset.copyLink)} ${who}`);}return;}
+      if(b.dataset.personTab){state.personTab=b.dataset.personTab;render();return;}
+      if(b.dataset.followList){await followList(Number(b.dataset.user),b.dataset.followList,b.dataset.name);return;}
+      if(b.dataset.follow){state.person=await api(`/api/users/${b.dataset.follow}/follow`,{method:"POST"});toast(`You're following ${state.person.user.username}! ➕`);return;}
+      if(b.dataset.unfollow){state.person=await api(`/api/users/${b.dataset.unfollow}/follow`,{method:"DELETE"});toast(`You unfollowed ${state.person.user.username}.`);return;}
+      if(b.dataset.friendPerson){const name=b.dataset.friendPerson,d=await api("/api/friends/request",send("POST",{username:name}));state.social=d;state.person=await api(`/api/users/${state.person.user.id}`);toast(d.accepted?`You and ${name} are now friends! 🎉`:`Friend request sent to ${name}! 💌`);return;}
+      if(b.dataset.acceptPerson){state.social=await api(`/api/friends/requests/${b.dataset.acceptPerson}/accept`,{method:"POST"});state.person=await api(`/api/users/${state.person.user.id}`);toast("You're now friends! 🎉");return;}
+      // The song starts straight away, while this tap still counts as a tap, and is saved after.
+      if(b.dataset.song){const before=state.user.song;state.user.song=b.dataset.song;syncMusic();render();try{state.user=(await api("/api/me/song",send("PUT",{song:b.dataset.song}))).user;}catch(err){state.user.song=before;syncMusic();toast(err.message,true);}render();return;}
+      if(b.dataset.playlist){await togglePlaylist(Number(b.dataset.playlist));return;}
+      if(b.id==="playlistAll"){state.playlistAll=!state.playlistAll;render();return;}
+      if(b.dataset.deletePost){await deletePost(Number(b.dataset.deletePost));return;}
+      if(b.dataset.reportPost){reportModal(Number(b.dataset.reportPost));return;}
+      if(b.dataset.keepPost){state.reports=await api(`/api/reports/${b.dataset.keepPost}`,{method:"DELETE"});toast("Kept. The reports on that post are cleared ✅");return;}
+      if(b.dataset.learnSubject){openLearnSubject(b.dataset.learnSubject);return;}
+      if(b.dataset.learnBack!==undefined){const L=state.learn;if(L.quiz)L.quiz=null;else Object.assign(L,{subject:null,unlocked:null});render();return;}
+      if(b.dataset.learnUnlock!==undefined){unlockGrades();return;}
+      if(b.dataset.learnGrade){regionModal(state.learn.subject,Number(b.dataset.learnGrade));return;}
+      if(b.dataset.learnStart!==undefined){await startQuiz(state.learn.quiz?.subject||state.learn.subject);return;}
+      if(b.dataset.learnChoice){const q=state.learn.quiz,item=q.questions[q.at];q.picked=Number(b.dataset.learnChoice);if(item.choices[q.picked]===item.right)q.score++;render();return;}
+      if(b.dataset.learnNext!==undefined){const q=state.learn.quiz;q.at++;q.picked=null;render();return;}
       if(b.id==="adultOff"){const d=await api("/api/adult",send("PUT",{on:false}));await zoneChanged(d.user);toast("18+ is off. Welcome back! 🌸");return;}
       if(b.dataset.kuchi){answerKuchi(b.dataset.kuchi);return;}
       if(b.dataset.picture){openPicture(Number(b.dataset.picture));return;}
@@ -1525,10 +2307,16 @@
   document.addEventListener("pointermove", e => { if (state.salon?.drag) salonDrag(e); });
   for (const type of ["pointerup", "pointercancel"]) document.addEventListener(type, () => { if (state.salon?.drag) { state.salon.drag = null; render(); } });
   document.addEventListener("submit", async e=>{
+    if(e.target.id==="kidOffForm"){
+      e.preventDefault();
+      try { const d=await api("/api/kid",send("PUT",{on:false,password:$("#kidOffPass").value}));await zoneChanged(d.user);toast("The kiddy zone is off. Welcome back! 🌸"); }
+      catch(err){toast(err.message,true);}
+      return;
+    }
     if(e.target.id==="friendForm"){
       e.preventDefault();
-      const username=$("#friendName").value.trim();
-      try { const d=await api("/api/friends/request",send("POST",{username}));state.social=d;toast(d.accepted?`You and ${username} are now friends! 🎉`:`Friend request sent to ${username}! 💌`); }
+      const q=$("#friendName").value.trim();
+      try { state.friendSearch={q,users:(await api(`/api/users?q=${encodeURIComponent(q)}`)).users};state.notice="";render(); }
       catch(err){toast(err.message,true);}
       return;
     }
@@ -1574,11 +2362,57 @@
     if(type==="video" && file && !file.type.startsWith("video/"))return toast("Choose a video file for a video post.",true);
     if(type==="photo" && file && !file.type.startsWith("image/"))return toast("Choose an image file for a photo post.",true);
     if(type!=="text" && !file)return toast("Choose a file, or select Text only.",true);
-    const body=new FormData();body.append("caption",caption);if(file)body.append("media",file);
-    try { await api("/api/posts",{method:"POST",body});state.page="feed";state.notice="";await refresh();toast("Your post is published on this server! 🌸"); }
+    const visibility=$('input[name="visibility"]:checked').value;
+    const body=new FormData();body.append("caption",caption);body.append("description",$("#description").value.trim());body.append("visibility",visibility);if(file)body.append("media",file);
+    try {
+      const d=await api("/api/posts",{method:"POST",body});state.notice="";await refresh();
+      // Public posts go to the feed; unlisted and private ones only show on your profile.
+      if(visibility==="public"){state.page="feed";toast("Your post is published on this server! 🌸");}
+      else if(visibility==="unlisted"){state.page="feed";toast("Your unlisted post is ready. Only your friends on Yakimma can see it. 👯");}
+      else{state.page="profile";state.myPosts=null;await loadPageData();toast("Your private post is saved. Only you can see it, on your profile. 🔒");}
+    }
     catch(err){toast(err.message,true);}
   });
+  // ---- The song picked in Settings, played on a loop on every page. Browsers only let a page play sound after you've
+  // tapped something on it, so if it can't start yet, it starts on your next tap. ----
+  const music = Object.assign(new Audio(), { loop: true, volume: 0.5 });
+  function syncMusic() {
+    const song = state.user && state.songs?.find(s => s.id === state.user.song && s.file && s.ready && !s.lock);
+    if (!song) { if (!music.paused) music.pause(); return; }
+    const src = `/songs/${song.file}`;
+    if (music.getAttribute("src") !== src) music.src = src;
+    if (music.paused) music.play().catch(() => {});
+  }
+  for (const type of ["pointerdown", "keydown"]) document.addEventListener(type, syncMusic);
+  // Every password box gets the eye button (EYE_OPEN while the password is hidden as dots, EYE_CLOSED while it's
+  // shown), including boxes added later.
+  function addPasswordEyes() {
+    for (const input of document.querySelectorAll('input[type="password"]:not([data-eye])')) {
+      input.dataset.eye = "";
+      const focused = document.activeElement === input, wrap = document.createElement("div"), eye = document.createElement("button");
+      const show = shown => {
+        const label = shown ? "Hide password" : "Show password";
+        input.type = shown ? "text" : "password";
+        Object.assign(eye, { innerHTML: shown ? EYE_CLOSED : EYE_OPEN, title: label });
+        eye.setAttribute("aria-label", label);
+        eye.setAttribute("aria-pressed", String(shown));
+      };
+      wrap.className = "password-wrap";
+      eye.type = "button"; eye.className = "eye";
+      eye.onclick = () => { show(input.type === "password"); input.focus(); };
+      show(false);
+      input.replaceWith(wrap);
+      wrap.append(input, eye);
+      if (focused) input.focus();
+    }
+  }
+  new MutationObserver(addPasswordEyes).observe(document.body, { childList: true, subtree: true });
   $("#homeBtn").addEventListener("click",e=>{e.preventDefault();state.page="feed";state.notice="";render();});
-  async function init(){try{await refresh();render();}catch(err){toast(err.message,true);}}
+  async function init(){
+    // A post's link (/post/<code>, or an older /post/<number>) opens that post.
+    const link = location.pathname.match(/^\/post\/([A-Za-z0-9_~-]+)$/);
+    if (link) Object.assign(state, { page: "post", postKey: link[1] });
+    try{await refresh();if(link)await loadPageData();render();}catch(err){toast(err.message,true);}
+  }
   init();
 })();
