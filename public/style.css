@@ -196,7 +196,8 @@ a.link-button{display:inline-block;border-radius:14px;padding:10px 14px;font-wei
 .about .signature{margin:0;text-align:right;font-weight:800;color:var(--nav-ink)}
 
 /* Advertisement */
-.ads{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+/* At most 3 cards in a row, so a 4th one starts a new row under the first instead of squeezing the others. */
+.ads{display:grid;grid-template-columns:repeat(auto-fit,minmax(max(220px,calc((100% - 24px)/3)),1fr));gap:12px}
 .ad{margin:0;display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center}
 .ad h2{margin:0;font-size:1.15rem}
 .ad p{margin:0;overflow-wrap:anywhere}
@@ -252,3 +253,91 @@ a.link-button{display:inline-block;border-radius:14px;padding:10px 14px;font-wei
 .post-desc{background:var(--surface2);border-radius:12px;padding:10px 12px;white-space:pre-wrap;line-height:1.5;overflow-wrap:anywhere;margin-top:-4px}.post-desc.clamped{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.link-btn{background:none;padding:4px 2px;color:var(--accent-ink);font-weight:800}.link-btn:hover{transform:none;text-decoration:underline}
 .visibility{border:1px solid var(--line);border-radius:14px;padding:8px 12px 12px;margin:12px 0 0}.visibility legend{font-weight:750;font-size:.9rem;padding:0 4px}.vis-option{display:flex;gap:10px;align-items:flex-start;margin:8px 0 0;font-weight:400;cursor:pointer}.vis-option input{width:auto;margin-top:3px}.vis-option span{display:flex;flex-direction:column}.vis-option small{color:var(--muted)}
 .post-code{margin:10px 0 0;font-size:.8rem;color:var(--muted)}.post-code code{font-family:ui-monospace,Menlo,monospace;font-size:.85rem;color:var(--ink);background:var(--surface2);padding:2px 6px;border-radius:6px;user-select:all}
+
+/* Tapping someone's picture or name opens their profile. Looks like the plain picture and name, like .post-author. */
+.person-link{display:inline-flex;align-items:center;gap:10px;padding:0;background:none;color:inherit;text-align:left;font-weight:inherit;border-radius:12px;min-width:0}
+button.person-link:hover{transform:none}
+button.person-link:hover strong{text-decoration:underline}
+/* An admin's @username, after their display name. */
+.at-name{color:var(--muted);font-weight:700;font-size:.8em}
+.person-main .at-name,.member .at-name{display:inline}
+
+/* On a smaller window, the things on someone's profile (MC, LC, items, friends, country, religion, followers) shrink to
+   just their emoji and number, so they fit. The words are still there for screen readers, and show when you hover. */
+@media(max-width:1050px){.person-things .thing-label{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}}
+
+/* 🔔 Notifications: the bell at the top, and the list that drops down from it (like the account menu). */
+.bell-btn{position:relative}
+.bell-btn .badge{position:absolute;top:-7px;right:-7px;margin:0}
+.notif-menu{position:absolute;right:0;top:calc(100% + 8px);z-index:20;width:min(360px,calc(100vw - 24px));max-height:min(70vh,520px);overflow-y:auto;padding:8px;background:var(--surface);border:1px solid var(--line);border-radius:16px;box-shadow:0 14px 40px #ad5d8c33}
+.notif-menu h2{font-size:1rem;margin:6px 8px 8px}
+.notif-menu .muted{margin:6px 8px 10px;line-height:1.5}
+.notif{display:flex;gap:10px;align-items:flex-start;width:100%;text-align:left;background:none;color:var(--ink);padding:9px 10px;font-weight:600;line-height:1.4;border-radius:12px}
+.notif:hover{transform:none;background:var(--surface2)}
+.notif.new{background:var(--pink2)}
+.notif small{display:block;color:var(--muted);font-weight:600}
+.notif small.at-name{display:inline}
+.notif-quote{font-style:italic;overflow-wrap:anywhere}
+
+/* @tags: tap one to open that person's profile. */
+.mention{display:inline;padding:0;margin:0;background:none;border:0;border-radius:4px;color:var(--accent-ink);font:inherit;font-weight:800;cursor:pointer}
+button.mention:hover,span.mention:hover{text-decoration:underline;transform:none;filter:none}
+
+/* 💬 Comments under a post */
+.comments{margin-top:12px;padding-top:12px;border-top:1px solid var(--line);display:grid;gap:10px}
+.comments>.muted{margin:0}
+.comment{display:flex;gap:8px;align-items:flex-start}
+.comment-body{min-width:0;flex:1;background:var(--surface2);border-radius:14px;padding:8px 11px}
+.comment-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.comment-head small{color:var(--muted)}
+.comment-body p{margin:4px 0;line-height:1.45;overflow-wrap:anywhere}
+.comment-tools{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+
+/* 🤝 Assistant, on profiles */
+.assistant-lines p{margin:10px 0 0;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.assistant-lines .person-link{gap:6px}
+.assistant-lines .muted-note{display:block;margin-top:10px}
+
+/* A group you're not in, where you were tagged: only those messages can be read. The rest is made-up text, blurred. */
+.tagged-modal{width:min(560px,100%)}
+.tagged-modal .chat-log{height:auto;max-height:min(55vh,460px)}
+.bubble.blurred{filter:blur(5px);user-select:none;pointer-events:none}
+
+/* Replies sit under the comment they answer, a little to the right. */
+.thread{display:grid;gap:8px}
+.replies{display:grid;gap:8px;margin-left:34px;padding-left:10px;border-left:2px solid var(--line)}
+
+/* 🖼️ Video thumbnails: the picker on the upload form and in the Thumbnail pop-up. */
+.thumb-box{border:1px solid var(--line);border-radius:16px;padding:12px;margin:12px 0 0}
+.thumb-box legend{font-weight:800;padding:0 6px}
+.thumb-box>.muted-note{margin:0 0 10px}
+.thumb-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.thumb-row figure{margin:0;display:grid;gap:4px;text-align:center}
+.thumb-row video,.thumb-preview{width:100%;aspect-ratio:16/9;object-fit:contain;background:var(--surface2);border-radius:12px;border:1px solid var(--line)}
+.thumb-row figcaption{font-size:.8rem;color:var(--muted);font-weight:700}
+.thumb-picker input[type=range]{padding:0;margin-top:6px}
+.thumb-modal{width:min(560px,100%)}
+@media(max-width:500px){.thumb-row{grid-template-columns:1fr}}
+
+/* What someone wrote when they reported a post for "Something else", on the Reports page. */
+.report-words{margin:6px 0 4px;padding:8px 12px;border-left:3px solid var(--pink);background:var(--surface2);border-radius:0 12px 12px 0;font-style:italic;overflow-wrap:anywhere}
+
+/* 📜 Rules, and the pop-up that sends new accounts there */
+.rules{list-style:none;margin:0;padding:0;display:grid;gap:10px;counter-reset:rule}
+.rules li{display:flex;gap:12px;align-items:flex-start;padding:12px;border:1px solid var(--line);border-radius:16px;background:var(--surface2);counter-increment:rule}
+.rules strong::before{content:counter(rule) ". "}
+.rules p{margin:4px 0 0;line-height:1.45;color:var(--muted)}
+.rule-icon{font-size:1.6rem;line-height:1}
+.rules-modal{text-align:center}
+.rules-modal .actions{justify-content:center}
+.rules-pop{font-size:3.4rem;line-height:1}
+.rules-modal h2{font-size:1.8rem;margin:8px 0}
+.rules .rule-penalty{margin-top:6px;color:var(--danger-ink);font-weight:800}
+
+/* 🛡️ Safety (creator only) and ⛔ suspensions */
+.safety-list{display:grid;gap:10px;margin-top:12px}
+.safety-list h3{margin:8px 0 0}
+.safety-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:10px 12px;border:1px solid var(--line);border-radius:14px;background:var(--surface2)}
+.safety-row .person-link{gap:6px}
+#safetyFilter{margin-top:12px}
+.report-reasons .link-btn{margin-left:6px;font-size:.85rem}

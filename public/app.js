@@ -20,6 +20,8 @@
   async function api(url, options = {}) {
     const res = await fetch(url, { credentials:"same-origin", ...options });
     const data = await res.json().catch(() => ({}));
+    // Only a "you're suspended" answer about your own account (403) means you are. The creator never is.
+    if (res.status === 403 && data.suspended && state.user && !state.user.creator && !state.user.suspended) { state.user.suspended = data.suspended; render(); }
     if (!res.ok) throw new Error(data.error || "Something went wrong.");
     return data;
   }
@@ -60,12 +62,106 @@
     if (a?.photoUrl) return `<span class="avatar photo ${size}"><img src="${safe(a.photoUrl)}" alt=""></span>`;
     return `<span class="avatar ${size}" style="background:${bgCss(a?.bg)}" aria-hidden="true">${safe(a?.emoji || "🌷")}</span>`;
   }
+  // The name to show for someone: the nickname you gave them if they're your friend (only you see it), or else their
+  // display name if they're an admin (the creator too), with their @username after it. Otherwise just their username.
+  const shownName = username => state.social?.nicknames?.[username?.toLowerCase()] || state.displayNames?.[username?.toLowerCase()];
+  const nameText = username => shownName(username) || username;
+  const nameHTML = username => {
+    const shown = shownName(username);
+    return shown ? `${safe(shown)} <small class="at-name">@${safe(username)}</small>` : safe(username);
+  };
+  // Text someone wrote, with each @username (a tag) picked out; tapping one opens that person's profile. The same pattern
+  // is in server.js. Inside a button (like a chat bubble) a tag can't be a button too, so there it's a span.
+  const TAG = /(^|[^A-Za-z0-9@])@([A-Za-z0-9]{3,20})(?![A-Za-z0-9])/g;
+  const richText = (text, inButton = false) => safe(text).replace(TAG, (_, before, name) =>
+    before + (inButton ? `<span class="mention" data-mention="${name}">@${name}</span>` : `<button type="button" class="mention" data-mention="${name}">@${name}</button>`));
+  // Someone's picture and name as a button that opens their profile (yours opens your Profile page). Guests can't open profiles.
+  const personLink = (id, username, inner) => id && state.user ? `<button class="person-link" data-view-person="${id}" title="See ${safe(nameText(username))}'s profile">${inner}</button>` : inner;
   const signInPanel = message => `<section class="panel"><p>${message}</p><button class="primary" id="openAuth">Sign in / Create account</button></section>`;
   function wallet() {
     $("#wallet").textContent = state.user ? `🐱 ${state.user.mc} MC · 💌 ${state.user.lc} LC` : "🐱 Sign in to save MC";
-    $("#accountBtn").innerHTML = state.user ? `${avatarHTML(state.user.avatar, "tiny")}<span class="acct-name">${safe(state.user.username)}</span> ▾` : "Sign in";
+    $("#accountBtn").innerHTML = state.user ? `${avatarHTML(state.user.avatar, "tiny")}<span class="acct-name">${safe(nameText(state.user.username))}</span> ▾` : "Sign in";
     $("#accountBtn").setAttribute("aria-label", state.user ? `Account menu for ${state.user.username}` : "Sign in");
     $("#accountBtn").setAttribute("aria-haspopup", state.user ? "menu" : "dialog");
+    bell();
+  }
+  // ---- 🔔 Notifications: the bell at the top, with how many are new. ----
+  function bell() {
+    const btn = $("#bellBtn"), n = state.unread || 0;
+    btn.hidden = !state.user;
+    btn.innerHTML = `🔔${n ? `<span class="badge" aria-hidden="true">${n > 99 ? "99+" : n}</span>` : ""}`;
+    btn.setAttribute("aria-label", n ? `Notifications: ${n} new` : "Notifications");
+  }
+  const NOTIFY_TEXT = {
+    tag: n => n.comment ? "tagged you in a comment" : n.message?.group ? `tagged you in ${safe(n.message.group.icon)} ${safe(n.message.group.name)}` : n.message ? "tagged you in a message" : "tagged you in a post",
+    request: () => "sent you a friend request 💌",
+    friend: () => "accepted your friend request 👯",
+    follow: () => "followed you 👀",
+    like: () => "liked your post 💗",
+    comment: () => "commented on your post 💬",
+    reply: () => "replied to your comment 💬",
+    reaction: n => `reacted ${safe(n.emoji)} to your ${n.comment ? "comment" : "message"}`,
+    assistant: () => "made you their assistant 🤝"
+  };
+  // Opening the bell shows the newest notifications (new ones highlighted) and marks them all as seen.
+  async function toggleBell() {
+    if ($("#notifMenu")) return $("#notifMenu").remove();
+    const d = await api("/api/notifications");
+    state.notifications = d.notifications;
+    const row = n => `<button class="notif ${n.read ? "" : "new"}" role="menuitem" data-notif="${n.id}">${avatarHTML(n.actor.avatar, "tiny")}<span><strong>${nameHTML(n.actor.username)}</strong> ${NOTIFY_TEXT[n.kind]?.(n) || ""}` +
+      `${n.comment ? `<small class="notif-quote">“${safe(n.comment.preview)}”</small>` : ""}<small>${timeLabel(n.createdAt)}</small></span></button>`;
+    $(".top-actions").insertAdjacentHTML("beforeend", `<div class="notif-menu" id="notifMenu" role="menu" aria-label="Notifications"><h2>🔔 Notifications</h2>` +
+      (d.notifications.length ? d.notifications.map(row).join("") : `<p class="muted">Nothing yet. When someone tags you, follows you, sends or accepts a friend request, or likes or comments on your post, it shows up here.</p>`) + `</div>`);
+    if (d.unread) await api("/api/notifications/read", { method: "POST" });
+    state.unread = 0; bell();
+  }
+  // Tapping a notification opens what it's about: the post (with its comments), the chat, or the person's profile.
+  async function openNotification(n) {
+    $("#notifMenu")?.remove();
+    if (n.post) {
+      if (n.comment) (state.comments ||= {})[n.post.id] = { open: true };
+      if (n.post.groupKey) { await openGroup(n.post.groupKey, "posts"); if (n.comment) await loadComments(n.post.id); return; }
+      history.replaceState(null, "", `/post/${n.post.code}`);
+      Object.assign(state, { page: "post", postKey: n.post.code, single: null, notice: "", chat: null, groupView: null });
+      render(); await loadPageData();
+      if (n.comment && state.single?.post) await loadComments(n.post.id); else render();
+      window.scrollTo(0, 0);
+      return;
+    }
+    if (n.message?.friendId) return openChat(n.message.friendId);
+    if (n.message) {
+      const g = n.message.group;
+      if (!g) return toast("That group doesn't exist any more.", true);
+      return g.member ? openGroup(g.key, "chat") : openTagged(g.key, n.message.id);
+    }
+    await openPerson(n.actor.id);
+  }
+  // A group you're not in, where someone tagged you: you only see the messages you were tagged in. Every other message is
+  // blurred (the server doesn't even send what they say or who sent them).
+  const BLURRED = ["hello everyone how is it going", "lol yes", "did you see that", "omg that's so cute", "ok see you later", "wait what", "hahaha", "I love this group so much"];
+  async function openTagged(key, focusId) {
+    const d = await api(`/api/groups/${encodeURIComponent(key)}/tagged`);
+    if (d.member) return openGroup(key, "chat");
+    const g = d.group;
+    const msg = m => m.hidden ? `<div class="msg" aria-hidden="true"><div class="msg-body"><div class="bubble blurred"><span class="b-text">${BLURRED[m.id % BLURRED.length]}</span></div></div></div>`
+      : m.deleted ? `<div class="msg"><div class="msg-body"><div class="bubble deleted"><span class="b-text">🚫 This message was deleted</span><small>${timeLabel(m.createdAt)}</small></div></div></div>`
+      : `<div class="msg ${m.id === focusId ? "picked" : ""}" id="tagged${m.id}">${personLink(m.userId, m.username, avatarHTML(m.avatar, "tiny"))}<div class="msg-body"><div class="bubble"><strong>${nameHTML(m.username)}</strong><span class="b-text">${richText(m.body)}</span><small>${timeLabel(m.createdAt)}</small></div></div></div>`;
+    const hidden = d.messages.filter(m => m.hidden).length;
+    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal tagged-modal" role="dialog" aria-modal="true" aria-labelledby="taggedTitle"><div class="row between"><h2 id="taggedTitle">${safe(g.icon)} ${safe(g.name)}</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
+      `<p class="notice">👀 You're not in this group, so you can only see the messages you were tagged in.${hidden ? ` The other ${hidden === 1 ? "message is" : `${hidden} messages are`} blurred.` : ""}</p>` +
+      `<div class="chat-log">${d.messages.map(msg).join("")}</div>` +
+      (g.secret ? `<p class="muted-note">This is a secret group. The only way in is its code.</p>` : `<div class="actions"><button class="primary" data-join-group="${safe(g.key)}">Join the group to see everything</button></div>`) + `</section></div>`;
+    $("#closeModal").onclick = closeModal;
+    $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
+    $(`#tagged${focusId}`)?.scrollIntoView({ block: "center" });
+  }
+  // Tapping an @tag opens that person's profile (your own opens your Profile page).
+  async function openTag(name) {
+    if (!state.user) return toast("Sign in to see people's profiles.", true);
+    if (name.toLowerCase() === state.user.username.toLowerCase()) return openPerson(state.user.id);
+    const found = (await api(`/api/users?q=${encodeURIComponent(name)}`)).users.find(u => u.username.toLowerCase() === name.toLowerCase());
+    if (!found) return toast(`Nobody on Yakimma is called @${name}.`, true);
+    await openPerson(found.id);
   }
   function friendsBadge() {
     const requests = state.social.incoming.length, unread = state.social.friends.reduce((n, f) => n + (f.unread || 0), state.social.ai?.unread || 0);
@@ -79,12 +175,14 @@
   }
   async function refresh() {
     const [me, feed] = await Promise.all([api("/api/me"), api("/api/posts")]);
-    state.user = me.user; state.products = me.products || []; state.inventory = me.inventory || []; state.posts = feed.posts || []; state.learnData = me.learn || null; state.reportReasons = me.reportReasons || []; state.usernameCost = me.usernameCost; state.songs = me.songs || [];
+    state.user = me.user; state.displayNames = me.displayNames || {}; state.unread = me.notifications || 0; state.products = me.products || []; state.inventory = me.inventory || []; state.posts = feed.posts || []; state.learnData = me.learn || null; state.reportReasons = me.reportReasons || []; state.usernameCost = me.usernameCost; state.songs = me.songs || [];
     if (me.religions) Object.assign(state, { religions: me.religions, countries: me.countries });
     if (me.themes) state.themes = me.themes;
     if (me.nailOptions) state.nailOptions = me.nailOptions;
     if (me.avatarOptions) state.avatarOptions = me.avatarOptions;
-    await loadSocial();
+    // A suspended account only sees the suspension screen (and the rules), so there's nothing else to load.
+    if (state.user?.suspended) Object.assign(state, { social: { friends: [], incoming: [], outgoing: [] }, received: [] });
+    else await loadSocial();
     wallet();
     if (state.user && !(state.user.religion && state.user.country)) identityModal();
   }
@@ -105,6 +203,7 @@
     if (state.page === "codes") await loadCodes();
     if (state.user && state.page === "pictures") state.pictures = await api("/api/pictures");
     if (state.user?.admin && state.page === "reports") state.reports = await api("/api/reports");
+    if (state.user?.creator && state.page === "safety") await loadSafety();
     if (state.page === "post") state.single = await api(`/api/posts/${encodeURIComponent(state.postKey)}`).then(d => ({ post: d.post }), err => ({ error: err.message }));
   }
 
@@ -251,14 +350,14 @@
   }
   // Tapping a message selects it and shows its actions underneath.
   function messageHTML(m) {
-    const c = state.chat, mine = m.userId === state.user?.id, picked = c.selected === m.id, face = mine ? "" : avatarHTML(m.avatar, "tiny");
+    const c = state.chat, mine = m.userId === state.user?.id, picked = c.selected === m.id, face = mine ? "" : personLink(m.userId, m.username, avatarHTML(m.avatar, "tiny"));
     if (m.deleted) return `<div class="msg ${mine ? "mine" : ""}">${face}<div class="msg-body"><div class="bubble deleted"><span class="b-text">🚫 This message was deleted</span><small>${timeLabel(m.createdAt)}</small></div></div></div>`;
     // AI's messages can only be read, so they have no actions to tap for.
     if (c.readOnly) return `<div class="msg">${face}<div class="msg-body"><div class="bubble"><span class="b-text">${safe(m.body)}</span><small>${timeLabel(m.createdAt)}</small></div></div></div>`;
-    const name = c.names && !mine ? `<strong>${safe(m.username)}</strong>` : "";
+    const name = c.names && !mine ? `<strong>${nameHTML(m.username)}</strong>` : "";
     const reactions = m.reactions.length ? `<div class="reactions">${m.reactions.map(r => `<button class="reaction ${r.mine ? "on" : ""}" data-react="${safe(r.emoji)}" data-msg="${m.id}" title="${safe(r.users.join(", "))}" aria-pressed="${r.mine}"><span class="emoji">${safe(r.emoji)}</span>${r.count}</button>`).join("")}</div>` : "";
     return `<div class="msg ${mine ? "mine" : ""} ${picked ? "picked" : ""}">${face}<div class="msg-body">` +
-      `<button class="bubble" data-pick-msg="${m.id}" aria-expanded="${picked}">${name}${m.forwarded ? `<span class="fwd">↪️ Forwarded</span>` : ""}<span class="b-text">${safe(m.body)}</span><small>${timeLabel(m.createdAt)}${m.editedAt ? " · edited" : ""}</small></button>` +
+      `<button class="bubble" data-pick-msg="${m.id}" aria-expanded="${picked}">${name}${m.forwarded ? `<span class="fwd">↪️ Forwarded</span>` : ""}<span class="b-text">${richText(m.body, true)}</span><small>${timeLabel(m.createdAt)}${m.editedAt ? " · edited" : ""}</small></button>` +
       reactions + (picked ? messageTools(m, mine) : "") + `</div></div>`;
   }
   function messageTools(m, mine) {
@@ -411,7 +510,7 @@
     const tag = m => (m.owner ? ` <span class="pill">👑 Owner</span>` : "") + (m.id === me ? ` <span class="pill">You</span>` : "");
     $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal members-modal" role="dialog" aria-modal="true" aria-labelledby="membersTitle"><div class="row between"><h2 id="membersTitle">${safe(d.icon)} ${safe(d.name)} members (${d.members.length})</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
       (d.members.length ? `<label class="sr-only" for="memberSearch">Search members</label><input id="memberSearch" type="search" placeholder="🔎 Search members" autocomplete="off">` +
-        `<div class="member-list">${d.members.map(m => `<div class="member" data-search="${safe(m.username.toLowerCase())}">${avatarHTML(m.avatar)}<strong>${safe(m.username)}</strong>${tag(m)}</div>`).join("")}</div><p class="muted" id="noMemberMatch" hidden>No members match that search.</p>`
+        `<div class="member-list">${d.members.map(m => `<div class="member" data-search="${safe(`${m.username} ${nameText(m.username)}`.toLowerCase())}">${personLink(m.id, m.username, `${avatarHTML(m.avatar)}<strong>${nameHTML(m.username)}</strong>`)}${tag(m)}</div>`).join("")}</div><p class="muted" id="noMemberMatch" hidden>No members match that search.</p>`
         : `<p class="muted">No one has joined yet.</p>`) + `</section></div>`;
     $("#closeModal").onclick = closeModal;
     $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
@@ -440,6 +539,8 @@
     try {
       await pollChat();
       if (ticks % 5) return;
+      const { unread } = await api("/api/notifications/unread");
+      if (unread !== state.unread) { state.unread = unread; bell(); }
       const before = JSON.stringify(state.social);
       state.social = await api("/api/friends");
       if (JSON.stringify(state.social) === before) return;
@@ -450,8 +551,10 @@
   }, 3000);
 
   // ---- Friends + Nail Salon pages ----
-  function personRow(person, sub, actions) {
-    return `<div class="person"><div class="person-main">${avatarHTML(person.avatar)}<div><strong>${safe(person.username)}</strong><small>${sub}</small></div></div><div class="row">${actions}</div></div>`;
+  // Tapping someone's picture or name opens their profile, except for people you've blocked (pass link: false).
+  function personRow(person, sub, actions, link = true) {
+    const who = `${avatarHTML(person.avatar)}<span><strong>${nameHTML(person.username)}</strong><small>${sub}</small></span>`;
+    return `<div class="person"><div class="person-main">${link ? personLink(person.userId ?? person.id, person.username, who) : who}</div><div class="row">${actions}</div></div>`;
   }
   // Someone in a list, with their followers and who they follow (tap either to see them) and a link to their profile.
   const personCard = u => personRow(u, "", `${followPills(u.id, u.followers, u.following, u.username)}<button class="primary" data-view-person="${u.id}">👤 See profile</button>`);
@@ -485,9 +588,14 @@
     if (!s) return top + `<section class="panel empty">Loading…</section>`;
     return top + `<section class="panel"><button class="soft" data-page="feed">← Feed</button></section>` + (s.post ? postCard(s.post) : `<section class="panel empty">${safe(s.error)}</section>`);
   }
+  // Opened by tapping someone's picture or name anywhere. Your own opens your Profile page.
   async function openPerson(id) {
+    if (id === state.user.id) {
+      closeModal(); Object.assign(state, { page: "profile", notice: "", chat: null, groupView: null }); render(); await loadPageData(); render(); window.scrollTo(0, 0);
+      return;
+    }
     state.person = await api(`/api/users/${id}`);
-    closeModal(); state.page = "person"; state.personTab = "all"; state.notice = ""; render(); window.scrollTo(0, 0);
+    closeModal(); Object.assign(state, { page: "person", personTab: "all", notice: "", chat: null, groupView: null }); render(); window.scrollTo(0, 0);
   }
   // Who follows someone ("followers") or who they follow ("following"), yourself included, in a pop-up.
   async function followList(userId, list, name) {
@@ -499,10 +607,20 @@
     $("#closeModal").onclick = closeModal;
     $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
   }
-  const followPills = (userId, followers, following, name) => `<button class="pill pill-btn" data-follow-list="followers" data-user="${userId}" data-name="${safe(name)}">👀 ${followers} follower${followers === 1 ? "" : "s"}</button>` +
-    `<button class="pill pill-btn" data-follow-list="following" data-user="${userId}" data-name="${safe(name)}">➡️ ${following} following</button>`;
+  const followPills = (userId, followers, following, name) => `<button class="pill pill-btn" data-follow-list="followers" data-user="${userId}" data-name="${safe(name)}" title="${followers} follower${followers === 1 ? "" : "s"}">👀 ${followers}<span class="thing-label"> follower${followers === 1 ? "" : "s"}</span></button>` +
+    `<button class="pill pill-btn" data-follow-list="following" data-user="${userId}" data-name="${safe(name)}" title="${following} following">➡️ ${following}<span class="thing-label"> following</span></button>`;
+  // 🤝 Who someone's assistant is, and whose assistant they are, for their profile.
+  function assistantLines(info, mine) {
+    const who = list => list.map(u => personLink(u.id, u.username, `${avatarHTML(u.avatar, "tiny")}<strong>${nameHTML(u.username)}</strong>`)).join("");
+    return `<div class="assistant-lines">` +
+      (info.assistant ? `<p>🤝 ${mine ? "My assistant" : "Assistant"}: ${who([info.assistant])}${mine ? `<button class="link-btn" data-assistant-remove="1">Remove</button>` : ""}</p>`
+        : mine ? `<p class="muted-note">${kidOn() ? "🤝 Assistants aren't in the kiddy zone." : "🤝 No assistant yet. Open the profile of a friend you trust and tap 🤝 Make my assistant."}</p>` : "") +
+      (info.assistantOf?.length ? `<p>🤝 Assistant to: ${who(info.assistantOf)}</p>` : "") + `</div>`;
+  }
   function personPage() {
-    const p = state.person, u = p.user, plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+    const p = state.person, u = p.user, plural = (n, word) => `${word}${n === 1 ? "" : "s"}`;
+    // One of their things: its emoji, number and name. On a smaller window only the emoji and number show (see .thing-label).
+    const thing = (icon, n, label) => `<span class="pill" title="${n} ${label}">${icon} ${n}<span class="thing-label"> ${label}</span></span>`;
     const friend = {
       friends: `<button class="soft" disabled>👯 Friends ✓</button>`,
       sent: `<button class="soft" disabled>💌 Friend request sent</button>`,
@@ -511,20 +629,28 @@
     }[p.friend];
     const follow = p.youFollow ? `<button class="soft" data-unfollow="${u.id}">✓ Following</button>` : `<button class="primary" data-follow="${u.id}">➕ Follow</button>`;
     // Someone in another zone shows up, but you can't add or follow them (you can still unfollow them).
-    const actions = p.zoneNote ? `${p.friend === "none" ? "" : friend}${p.youFollow ? follow : ""}` : friend + follow;
+    // A friend you trust can be your assistant, but not in the kiddy zone or across the zone rules (you can still take
+    // them off). Friends can also get a nickname that only you see.
+    const isFriend = p.friend === "friends";
+    const helper = state.user.assistant?.id === u.id ? `<button class="soft" data-assistant-remove="1">🤝 Your assistant ✓</button>`
+      : isFriend && !kidOn() && !p.zoneNote ? `<button class="soft" data-assistant="${u.id}">🤝 Make my assistant</button>` : "";
+    const nickname = isFriend ? `<button class="soft" data-nickname="${u.id}" data-name="${safe(u.username)}">🏷️ Nickname</button>` : "";
+    const suspend = !state.user.creator || u.username.toLowerCase() === "creator" ? ""
+      : p.suspended ? `<button class="soft" data-unsuspend="${u.id}" data-name="${safe(u.username)}">Lift the suspension</button>` : `<button class="soft" data-suspend="${u.id}" data-name="${safe(u.username)}">⛔ Suspend</button>`;
+    const actions = (p.zoneNote ? `${p.friend === "none" ? "" : friend}${p.youFollow ? follow : ""}` : friend + follow) + helper + nickname + suspend;
     // Like a YouTube channel: everything, just their videos, or just their photo and text posts.
     const isVideo = x => x.mediaType?.startsWith("video/"), tab = state.personTab || "all";
     const lists = { all: p.posts, videos: p.posts.filter(isVideo), posts: p.posts.filter(x => !isVideo(x)) }, shown = lists[tab];
     const tabs = [["all", "All"], ["videos", "🎬 Videos"], ["posts", "📝 Posts"]].map(([id, label]) => `<button class="step ${tab === id ? "on" : ""}" data-person-tab="${id}" aria-pressed="${tab === id}">${label} (${lists[id].length})</button>`).join("");
-    return hero(`${safe(u.username)} 👤`, `See ${safe(u.username)}'s wallet, items and posts, send a friend request, or follow them.`, "PROFILE") +
-      `<section class="panel"><button class="soft" data-page="friends">← Friends</button><div class="posthead" style="margin-top:12px">${avatarHTML(u.avatar, "big")}<div><h2 style="margin:0">${safe(u.username)}</h2>` +
+    return hero(`${safe(nameText(u.username))} 👤`, `See ${safe(nameText(u.username))}'s wallet, items and posts, send a friend request, or follow them.`, "PROFILE") +
+      `<section class="panel"><button class="soft" data-page="friends">← Friends</button><div class="posthead" style="margin-top:12px">${avatarHTML(u.avatar, "big")}<div><h2 style="margin:0">${nameHTML(u.username)}</h2>` +
       `<small>🔢 Account number ${u.accountNumber}${p.followsYou ? " · Follows you" : ""}</small></div></div>` +
-      `<div class="row"><span class="pill">🐱 ${p.mc} MC</span><span class="pill">💌 ${p.lc} LC</span><span class="pill">🎁 ${plural(p.items, "item")}</span><span class="pill">👯 ${plural(p.friends, "friend")}</span>${identityPills(u)}` +
-      `${followPills(u.id, p.followers, p.following, u.username)}</div>${actions ? `<div class="actions">${actions}</div>` : ""}${p.zoneNote ? `<p class="muted-note">${safe(p.zoneNote)}</p>` : ""}</section>` +
-      `<section class="panel"><h3>${safe(u.username)}'s posts (${p.posts.length})</h3><div class="tabs" role="group" aria-label="Which posts">${tabs}</div>${shown.length ? "" : `<p class="muted">${tab === "videos" ? "No videos to see yet." : "No posts to see yet."}</p>`}</section><div class="feed">${shown.map(postCard).join("")}</div>`;
+      `<div class="row person-things">${thing("🐱", p.mc, "MC")}${thing("💌", p.lc, "LC")}${thing("🎁", p.items, plural(p.items, "item"))}${thing("👯", p.friends, plural(p.friends, "friend"))}${identityPills(u)}` +
+      `${followPills(u.id, p.followers, p.following, u.username)}</div>${p.suspended ? `<p class="notice error">⛔ Suspended until ${safe(untilText(p.suspended))}${p.suspended.reason ? `: ${safe(p.suspended.reason)}` : ""}</p>` : ""}${assistantLines(p, false)}${actions ? `<div class="actions">${actions}</div>` : ""}${p.zoneNote ? `<p class="muted-note">${safe(p.zoneNote)}</p>` : ""}</section>` +
+      `<section class="panel"><h3>${safe(nameText(u.username))}'s posts (${p.posts.length})</h3><div class="tabs" role="group" aria-label="Which posts">${tabs}</div>${shown.length ? "" : `<p class="muted">${tab === "videos" ? "No videos to see yet." : "No posts to see yet."}</p>`}</section><div class="feed">${shown.map(postCard).join("")}</div>`;
   }
   function friendsPage() {
-    const top = hero("Friends 👯", "Search for people by their username to see their profile, then send them a friend request or follow them. Friends can do each other's nails in the Nail Salon.", "YOUR PEOPLE");
+    const top = hero("Friends 👯", "Search for people by their username or display name to see their profile, then send them a friend request or follow them. Friends can do each other's nails in the Nail Salon.", "YOUR PEOPLE");
     if (!state.user) return top + signInPanel("Sign in to add friends.");
     const { friends, incoming, outgoing, blocked = [] } = state.social;
     const block = p => `<button class="soft" data-block="${p.userId ?? p.id}" data-name="${safe(p.username)}">🚫 Block</button>`;
@@ -532,18 +658,18 @@
     if (state.chat?.ai && ai) return hero("AI assistant 🤖", "Yakimma's AI sends you tips here, like how to get what you need in the Shop.", "AI ASSISTANT") +
       `<section class="panel"><div class="row chat-head"><button class="soft" data-page="friends">← Friends</button>${avatarHTML(ai.avatar)}<strong>${safe(ai.username)}</strong></div>${chatBox()}</section>`;
     const chatting = state.chat?.friendId && friends.find(f => f.id === state.chat.friendId);
-    if (chatting) return hero(`Chat with ${safe(chatting.username)} 💬`, "Only you and your friend can see this chat.", "FRIEND CHAT") +
-      `<section class="panel"><div class="row chat-head"><button class="soft" data-page="friends">← Friends</button>${avatarHTML(chatting.avatar)}<strong>${safe(chatting.username)}</strong></div>${chatBox(`Message ${chatting.username}`)}</section>`;
+    if (chatting) return hero(`Chat with ${safe(nameText(chatting.username))} 💬`, "Only you and your friend can see this chat, and the creator, who keeps Yakimma safe.", "FRIEND CHAT") +
+      `<section class="panel"><div class="row chat-head"><button class="soft" data-page="friends">← Friends</button>${personLink(chatting.id, chatting.username, `${avatarHTML(chatting.avatar)}<strong>${nameHTML(chatting.username)}</strong>`)}</div>${chatBox(`Message ${nameText(chatting.username)}`)}</section>`;
     return top +
-      `<section class="panel"><h2>Find people 🔎</h2><form id="friendForm" class="row nowrap"><label class="sr-only" for="friendName">Their username</label><input id="friendName" maxlength="20" placeholder="Their username" autocomplete="off" required value="${safe(state.friendSearch?.q || "")}"><button class="primary" type="submit">Search</button></form>` +
-        (state.friendSearch ? (state.friendSearch.users.map(personCard).join("") || `<p class="muted">Nobody has a username like "${safe(state.friendSearch.q)}".</p>`)
+      `<section class="panel"><h2>Find people 🔎</h2><form id="friendForm" class="row nowrap"><label class="sr-only" for="friendName">Their username or display name</label><input id="friendName" maxlength="30" placeholder="Their username or display name" autocomplete="off" required value="${safe(state.friendSearch?.q || "")}"><button class="primary" type="submit">Search</button></form>` +
+        (state.friendSearch ? (state.friendSearch.users.map(personCard).join("") || `<p class="muted">Nobody has a username or display name like "${safe(state.friendSearch.q)}".</p>`)
           : `<p class="muted-note">Open someone's profile to send them a friend request or follow them.</p>`) + `</section>` +
       `<section class="panel"><h2>👥 Everyone on Yakimma</h2><p class="muted-note">Scroll down to see more people.</p><div id="peopleList">${(state.people?.users || []).map(personCard).join("")}</div>${peopleEnd()}</section>` +
       (incoming.length ? `<section class="panel"><h2>Friend requests 💌</h2>${incoming.map(r => personRow(r, "wants to be your friend", `<button class="primary" data-accept="${r.requestId}">Accept</button><button class="soft" data-reject="${r.requestId}">Decline</button>${block(r)}`)).join("")}</section>` : "") +
       (ai ? `<section class="panel"><h2>AI assistant</h2>${personRow(ai, "Your Yakimma helper. AI messages you tips, like what you need to buy something in the Shop.", `<button class="primary" id="aiChat">💬 Chat${ai.unread ? ` <span class="badge" aria-label="${ai.unread} unread">${ai.unread}</span>` : ""}</button>`)}</section>` : "") +
       `<section class="panel"><h2>My friends (${friends.length})</h2>${friends.length ? friends.map(f => personRow(f, `<span class="tone-dot" style="background:${toneHex(f.handTone)}"></span> ${safe(toneName(f.handTone))} hand`, (f.canTalk === false ? `<button class="soft" disabled title="${zoneOn() ? "In the 18+ zone you can only talk to people who are 18+" : "They're in the 18+ zone right now"}">🔞 Can't chat</button>` : `<button class="primary" data-chat="${f.id}">💬 Chat${f.unread ? ` <span class="badge" aria-label="${f.unread} unread">${f.unread}</span>` : ""}</button>`) + (zoneOn() || f.canTalk === false ? "" : `<button class="soft" data-salon="${f.id}">💅 Do their nails</button>`) + `<button class="soft" data-unfriend="${f.id}" data-name="${safe(f.username)}">Remove</button>${block(f)}`)).join("") : `<p class="muted">No friends yet. Send a request above! 🌸</p>`}</section>` +
       (outgoing.length ? `<section class="panel"><h2>Sent requests</h2>${outgoing.map(r => personRow(r, "waiting for them to accept…", `<button class="soft" data-reject="${r.requestId}">Cancel</button>`)).join("")}</section>` : "") +
-      (blocked.length ? `<section class="panel"><h2>Blocked (${blocked.length})</h2>${blocked.map(p => personRow(p, "blocked", `<button class="soft" data-unblock="${p.id}" data-name="${safe(p.username)}">Unblock</button>`)).join("")}<p class="muted-note">People you block can't send you friend requests, and you won't see their messages or posts.</p></section>` : "");
+      (blocked.length ? `<section class="panel"><h2>Blocked (${blocked.length})</h2>${blocked.map(p => personRow(p, "blocked", `<button class="soft" data-unblock="${p.id}" data-name="${safe(p.username)}">Unblock</button>`, false)).join("")}<p class="muted-note">People you block can't send you friend requests, and you won't see their messages or posts.</p></section>` : "");
   }
   function receivedGallery(limit) {
     if (!state.received.length) return `<p class="muted">No nail sets yet. Do your own nails, or when a friend does them, they show up here. 💌</p>`;
@@ -891,17 +1017,78 @@
   function applySpeeds() {
     document.querySelectorAll(".post video").forEach(video => { video.defaultPlaybackRate = video.playbackRate = viewOf(video.closest(".post").dataset.post).speed; });
   }
+  // ---- 🖼️ Video thumbnails: a picture shown on a video before it plays. Pick a moment from the video, or a picture. ----
+  const thumbPickerHTML = current => `<div class="thumb-picker"><div class="thumb-row">` +
+    `<figure><video class="thumb-video" muted playsinline preload="auto"></video><figcaption>The video</figcaption></figure>` +
+    `<figure><img class="thumb-preview" alt="The thumbnail" ${current ? `src="${safe(current)}"` : "hidden"}><figcaption>Thumbnail</figcaption></figure></div>` +
+    `<label>Moment in the video<input class="thumb-time" type="range" min="0" max="0" step="0.1" value="0" disabled></label>` +
+    `<div class="actions"><button type="button" class="soft thumb-use" disabled>📸 Use this moment</button><label class="file-btn soft"><input type="file" class="thumb-file" accept="image/jpeg,image/png,image/gif,image/webp">📁 Choose a picture</label></div>` +
+    `<p class="muted-note thumb-note" role="status"></p></div>`;
+  // Draws a video's frame (or a picture) as a JPEG at most 1280 pixels wide. Re-drawing also strips hidden photo data.
+  const toThumb = source => new Promise(resolve => {
+    const w = source.videoWidth || source.naturalWidth, h = source.videoHeight || source.naturalHeight;
+    if (!w || !h) return resolve(null);
+    const k = Math.min(1, 1280 / w), c = document.createElement("canvas");
+    c.width = Math.round(w * k); c.height = Math.round(h * k);
+    c.getContext("2d").drawImage(source, 0, 0, c.width, c.height);
+    c.toBlob(resolve, "image/jpeg", 0.85);
+  });
+  // Sets up a picker for the video at `src`. With `auto`, a moment near the start is picked straight away.
+  function wireThumbPicker(box, src, onPick, auto) {
+    const video = box.querySelector(".thumb-video"), range = box.querySelector(".thumb-time"), use = box.querySelector(".thumb-use"), note = box.querySelector(".thumb-note");
+    const pick = blob => {
+      if (!blob) return;
+      const img = box.querySelector(".thumb-preview");
+      img.src = URL.createObjectURL(blob); img.hidden = false; onPick(blob);
+    };
+    let first = auto;
+    video.onloadedmetadata = () => {
+      const t = Math.min(1, (video.duration || 0) / 3);
+      range.max = video.duration || 0; range.value = t; range.disabled = use.disabled = false; video.currentTime = t;
+    };
+    video.onseeked = async () => { if (first) { first = false; pick(await toThumb(video)); } };
+    video.onerror = () => { range.disabled = use.disabled = true; note.textContent = "This browser can't show this video, so choose a picture for its thumbnail instead."; };
+    range.oninput = () => { video.currentTime = Number(range.value); };
+    use.onclick = async () => pick(await toThumb(video));
+    box.querySelector(".thumb-file").onchange = e => {
+      const file = e.target.files[0]; if (!file) return;
+      const img = new Image();
+      img.onload = async () => { URL.revokeObjectURL(img.src); pick(await toThumb(img)); };
+      img.onerror = () => { note.textContent = "That file couldn't be opened as a picture. Try a JPG or PNG."; };
+      img.src = URL.createObjectURL(file);
+    };
+    video.src = src;
+  }
+  // Changing the thumbnail of a video that's already posted.
+  function thumbModal(p) {
+    let blob = null;
+    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal thumb-modal" role="dialog" aria-modal="true" aria-labelledby="thumbTitle"><div class="row between"><h2 id="thumbTitle">🖼️ Thumbnail</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
+      `<p>This picture shows on your video before it plays. Pick a moment from the video, or choose a picture.</p>${thumbPickerHTML(p.thumbUrl)}` +
+      `<div class="actions"><button class="primary" id="saveThumb" disabled>Save thumbnail</button></div><p class="muted-note error-text" id="thumbError" role="alert"></p></section></div>`;
+    $("#closeModal").onclick = closeModal;
+    $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
+    wireThumbPicker($(".thumb-modal"), p.mediaUrl, b => { blob = b; $("#saveThumb").disabled = false; }, !p.thumbUrl);
+    $("#saveThumb").onclick = async () => {
+      const body = new FormData(); body.append("thumb", blob, "thumb.jpg");
+      $("#saveThumb").disabled = true;
+      try {
+        const d = await api(`/api/posts/${p.id}/thumbnail`, { method: "PUT", body });
+        for (const x of postCopies(p.id)) x.thumbUrl = d.thumbUrl;
+        closeModal(); toast("Your video has a new thumbnail! 🖼️");
+      } catch (err) { $("#thumbError").textContent = err.message; $("#saveThumb").disabled = false; }
+    };
+  }
   function postMedia(p) {
     if (!p.mediaUrl) return `<div class="notice">📝 Text post</div>`;
     if (!p.mediaType?.startsWith("video/")) return `<img class="media" src="${p.mediaUrl}" alt="Post uploaded by ${safe(p.username)}">`;
     const effect = viewOf(p.id).effect;
-    return `<div class="media-wrap fx-${effect}"><video class="media" src="${p.mediaUrl}" controls playsinline preload="metadata"></video><div class="fx-layer" aria-hidden="true">${fxParticles(effect)}</div></div>`;
+    return `<div class="media-wrap fx-${effect}"><video class="media" src="${p.mediaUrl}" ${p.thumbUrl ? `poster="${p.thumbUrl}"` : ""} controls playsinline preload="metadata"></video><div class="fx-layer" aria-hidden="true">${fxParticles(effect)}</div></div>`;
   }
   // Who can see a post, like YouTube: [id, label, what it means].
   const VISIBILITY = [
     ["public", "🌍 Public", "Everyone can see it, on the feed and your profile."],
-    ["unlisted", "🔗 Unlisted", "Only your friends on Yakimma can see it."],
-    ["private", "🔒 Private", "Only you can see it, on your profile."]
+    ["unlisted", "🔗 Unlisted", "Only your friends on Yakimma can see it (and the creator, who keeps Yakimma safe)."],
+    ["private", "🔒 Private", "Only you can see it, on your profile (and the creator, who keeps Yakimma safe)."]
   ];
   const postLink = code => `${location.origin}/post/${code}`;
   // Every copy of a post that's on show (feed, profiles, a group, its own page), to update them all at once.
@@ -932,6 +1119,7 @@
     if (!state.user) return "";
     const mine = state.user.id === p.userId;
     return (mine && !p.inGroup ? `<button class="soft" data-post-visibility="${p.id}">👁️ Who can see it</button>` : "") +
+      (mine && p.mediaType?.startsWith("video/") ? `<button class="soft" data-post-thumb="${p.id}">🖼️ Thumbnail</button>` : "") +
       (p.inGroup ? "" : `<button class="soft" data-copy-link="${safe(p.code)}" data-visibility="${p.visibility}">🔗 Copy link</button>`) + (mine || state.user.admin ? `<button class="soft" data-delete-post="${p.id}">🗑️ Delete</button>` : "") + (mine ? "" : `<button class="soft" data-report-post="${p.id}">🚩 Report</button>`);
   }
   // Putting a post in your playlist, or taking it out. Every copy of the post on show changes, and the playlist on your
@@ -960,41 +1148,163 @@
     if (state.single?.post?.id === id) state.single = { error: "This post was deleted." };
     toast("The post is deleted 🗑️");
   }
-  function reportModal(id) {
-    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="reportTitle"><div class="row between"><h2 id="reportTitle">🚩 Report this post</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
-      `<p>Why are you reporting it? Yakimma's admins will look at it.</p><div class="grade-list">${state.reportReasons.map((r, i) => `<button class="soft" data-reason="${i}">${safe(r)}</button>`).join("")}</div><p class="muted-note error-text" id="reportError" role="alert"></p></section></div>`;
+  // The last reason, "Something else", needs the reporter to say what's wrong in their own words. The admins see it.
+  function reportModal(id, kind = "post") {
+    const other = state.reportReasons.length - 1;
+    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="reportTitle"><div class="row between"><h2 id="reportTitle">🚩 Report this ${kind}</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
+      `<p>Why are you reporting it? Yakimma's admins will look at it.</p><div class="grade-list">${state.reportReasons.map((r, i) => `<button class="soft" data-reason="${i}" ${i === other ? `aria-expanded="false"` : ""}>${safe(r)}</button>`).join("")}</div>` +
+      `<form id="reportOtherForm" hidden><label for="reportDetails">What's wrong? Write it in your own words</label><textarea id="reportDetails" maxlength="500" rows="3" required placeholder="Tell the admins what's wrong with this ${kind}"></textarea>` +
+      `<p class="muted-note">The admins will see what you write with your report.</p><div class="actions"><button class="primary" type="submit">Send report 🚩</button></div></form>` +
+      `<p class="muted-note error-text" id="reportError" role="alert"></p></section></div>`;
     $("#closeModal").onclick = closeModal;
     $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
-    for (const btn of document.querySelectorAll("[data-reason]")) btn.onclick = async () => {
-      try { await api(`/api/posts/${id}/report`, send("POST", { reason: state.reportReasons[btn.dataset.reason] })); closeModal(); toast("Thanks for telling us. The post is reported 🚩"); }
+    const report = async (reason, details) => {
+      try { await api(`/api/${kind === "comment" ? "comments" : "posts"}/${id}/report`, send("POST", { reason, details })); closeModal(); toast(`Thanks for telling us. The ${kind} is reported 🚩`); }
       catch (err) { $("#reportError").textContent = err.message; }
     };
+    for (const btn of document.querySelectorAll("[data-reason]")) btn.onclick = () => {
+      if (Number(btn.dataset.reason) !== other) return report(state.reportReasons[btn.dataset.reason]);
+      $("#reportOtherForm").hidden = false; btn.setAttribute("aria-expanded", "true"); btn.className = "primary"; $("#reportDetails").focus();
+    };
+    $("#reportOtherForm").onsubmit = e => { e.preventDefault(); report(state.reportReasons[other], $("#reportDetails").value.trim()); };
   }
   // The Reports page, only for admins and not in the kiddy zone: reported 18+ posts in the 18+ zone, and reported
   // posts from the normal site and the kiddy zone everywhere else, with who reported them and why.
+  // The creator can also suspend whoever posted it, or someone who made a false report.
   function reportsPage() {
-    const top = hero("Reports 🚩", "Posts people reported. Delete the ones that break the rules, or keep the ones that are fine.", "ADMINS ONLY"), list = state.reports?.posts;
+    const creator = state.user.creator;
+    const top = hero("Reports 🚩", creator ? "Posts and comments people reported. Suspend the person, delete it, or keep it if it's fine. If a report is false, you can suspend whoever sent it." : "Posts and comments people reported. Delete the ones that break the rules, or keep the ones that are fine.", "ADMINS ONLY");
+    const list = state.reports?.posts, comments = state.reports?.comments || [];
     if (!list) return top + `<section class="panel empty">Loading…</section>`;
-    return top + (list.map(p => `<section class="panel report"><h3>🚩 Reported ${p.reports.length} time${p.reports.length === 1 ? "" : "s"}${p.kid ? ` <span class="pill">🧸 Kiddy zone post</span>` : ""}</h3><ul class="report-reasons">${p.reports.map(r => `<li><strong>${safe(r.username)}</strong>: ${safe(r.reason)} <small>${timeLabel(r.createdAt)}</small></li>`).join("")}</ul>` +
-      `${postCard(p)}<div class="actions"><button class="danger" data-delete-post="${p.id}">🗑️ Delete the post</button><button class="soft" data-keep-post="${p.id}">✅ It's fine, keep it</button></div></section>`).join("")
-      || `<section class="panel empty">No reported posts right now. 🎉</section>`);
+    const suspendBtn = (id, name, label, reason) => creator ? `<button class="soft" data-suspend="${id}" data-name="${safe(name)}" data-reason="${safe(reason)}">⛔ ${label}</button>` : "";
+    const reasons = reports => `<ul class="report-reasons">${reports.map(r => `<li>${personLink(r.reporterId, r.username, `<strong>${nameHTML(r.username)}</strong>`)}: ${safe(r.reason)} <small>${timeLabel(r.createdAt)}</small>` +
+      `${creator ? `<button class="link-btn" data-suspend="${r.reporterId}" data-name="${safe(r.username)}" data-reason="False report">⛔ Suspend for a false report</button>` : ""}${r.details ? `<blockquote class="report-words">“${safe(r.details)}”</blockquote>` : ""}</li>`).join("")}</ul>`;
+    const times = n => `${n} time${n === 1 ? "" : "s"}`;
+    const posts = list.map(p => `<section class="panel report"><h3>🚩 Post reported ${times(p.reports.length)}${p.kid ? ` <span class="pill">🧸 Kiddy zone post</span>` : ""}</h3>${reasons(p.reports)}` +
+      `${postCard(p)}<div class="actions">${suspendBtn(p.userId, p.username, `Suspend ${safe(nameText(p.username))}`, "Your post broke Yakimma's rules")}<button class="danger" data-delete-post="${p.id}">🗑️ Delete the post</button><button class="soft" data-keep-post="${p.id}">✅ It's fine, keep it</button></div></section>`).join("");
+    const reportedComments = comments.map(c => `<section class="panel report"><h3>🚩 Comment reported ${times(c.reports.length)}${c.kid ? ` <span class="pill">🧸 Kiddy zone</span>` : ""}</h3>${reasons(c.reports)}` +
+      `<div class="comment">${personLink(c.userId, c.username, avatarHTML(c.avatar, "tiny"))}<div class="comment-body"><div class="comment-head">${personLink(c.userId, c.username, `<strong>${nameHTML(c.username)}</strong>`)}<small>${timeLabel(c.createdAt)}</small></div><p>${richText(c.body)}</p><small class="muted">On the post “${safe(c.post.caption)}”</small></div></div>` +
+      `<div class="actions">${suspendBtn(c.userId, c.username, `Suspend ${safe(nameText(c.username))}`, "Your comment broke Yakimma's rules")}${c.canDelete ? `<button class="danger" data-report-comment-delete="${c.id}">🗑️ Delete the comment</button>` : ""}<button class="soft" data-keep-comment="${c.id}">✅ It's fine, keep it</button></div></section>`).join("");
+    return top + (posts + reportedComments || `<section class="panel empty">No reported posts or comments right now. 🎉</section>`);
+  }
+  // ---- ⛔ Suspensions (only the creator): for any number of days, with a reason the person sees. ----
+  function suspendModal(id, username, reason = "") {
+    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="suspendTitle"><div class="row between"><h2 id="suspendTitle">⛔ Suspend @${safe(username)}</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
+      `<p>A suspended account can't do anything on Yakimma until the suspension is over. They'll see how long it lasts and why.</p>` +
+      `<form id="suspendForm"><label for="suspendDays">How many days?</label><input id="suspendDays" type="number" min="1" max="3650" value="3" required>` +
+      `<label for="suspendReason">Why? <small>(they'll see this)</small></label><input id="suspendReason" maxlength="300" value="${safe(reason)}" placeholder="Like: You broke rule 2, harassing people">` +
+      `<div class="actions"><button class="danger" type="submit">⛔ Suspend</button><button class="soft" type="button" id="suspendCancel">Cancel</button></div></form><p class="muted-note error-text" id="suspendError" role="alert"></p></section></div>`;
+    $("#closeModal").onclick = $("#suspendCancel").onclick = closeModal;
+    $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
+    $("#suspendForm").onsubmit = async e => {
+      e.preventDefault();
+      const days = Number($("#suspendDays").value);
+      try {
+        await api(`/api/users/${id}/suspend`, send("POST", { days, reason: $("#suspendReason").value }));
+        closeModal(); await suspensionsChanged();
+        toast(`${username} is suspended for ${days} day${days === 1 ? "" : "s"}. ⛔`);
+      } catch (err) { $("#suspendError").textContent = err.message; }
+    };
+    $("#suspendDays").select();
+  }
+  // After suspending someone or lifting a suspension, whatever page is open shows it.
+  async function suspensionsChanged() {
+    if (state.page === "person" && state.person) state.person = await api(`/api/users/${state.person.user.id}`);
+    if (state.page === "safety") await loadSafety();
+  }
+  const untilText = s => new Date(s.until).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  function suspendedPage() {
+    const s = state.user.suspended;
+    return hero("Your account is suspended ⛔", "The creator suspended your account because something broke Yakimma's rules.", "SUSPENDED") +
+      `<section class="panel"><p class="notice error">⛔ You can't use Yakimma until <strong>${safe(untilText(s))}</strong>.</p>${s.reason ? `<p><strong>Why:</strong> ${safe(s.reason)}</p>` : ""}` +
+      `<p class="muted-note">When the suspension is over, everything comes back. Read the rules so it doesn't happen again.</p>` +
+      `<div class="actions"><button class="primary" data-page="rules">📜 Read the rules</button>${kidOn() ? "" : `<button class="soft" id="logout">🚪 Sign out</button>`}</div></section>`;
+  }
+  // ---- 🛡️ Safety (only the creator): every chat, comment and private or unlisted post, newest first. ----
+  // state.safety: { tab, user, data } — user is a username to show only what that person was part of.
+  const SAFETY_TABS = [["chats", "💬 Chats"], ["comments", "💭 Comments"], ["posts", "🔒 Private posts"], ["suspended", "⛔ Suspended"]];
+  async function loadSafety() {
+    const v = state.safety ||= { tab: "chats", user: "" };
+    v.data = await api(`/api/safety/${v.tab}${v.user && v.tab !== "suspended" ? `?user=${encodeURIComponent(v.user)}` : ""}`);
+  }
+  function safetyPage() {
+    const v = state.safety || { tab: "chats", user: "" }, d = v.data;
+    const top = hero("Safety 🛡️", "Only you can see this page. Every chat, comment and private post on Yakimma, newest first, so you can keep everyone safe.", "CREATOR ONLY");
+    const tabs = `<div class="tabs" role="tablist">${SAFETY_TABS.map(([id, label]) => `<button class="step ${v.tab === id ? "on" : ""}" data-safety-tab="${id}" role="tab" aria-selected="${v.tab === id}">${label}</button>`).join("")}</div>`;
+    const filter = v.tab === "suspended" ? "" : `<form id="safetyFilter" class="row nowrap"><label class="sr-only" for="safetyUser">Only show one person</label><input id="safetyUser" maxlength="20" placeholder="Only show one person: type their username" autocomplete="off" value="${safe(v.user)}"><button class="primary" type="submit">Show</button>${v.user ? `<button class="soft" type="button" id="safetyClear">Show everyone</button>` : ""}</form>`;
+    const who = u => personLink(u.id, u.username, `${avatarHTML(u.avatar, "tiny")}<strong>${nameHTML(u.username)}</strong>`);
+    const when = t => `<small class="muted">${timeLabel(t)}</small>`;
+    let body = `<p class="muted">Loading…</p>`;
+    if (d && v.tab === "chats") body = `<h3>👯 Friend chats</h3>${d.friends.map(c => `<div class="safety-row"><span class="row">${who(c.a)} <span aria-hidden="true">💬</span> ${who(c.b)}</span><span class="row"><small>${c.messages} message${c.messages === 1 ? "" : "s"}</small>${when(c.lastAt)}<button class="soft" data-safety-chat="${c.a.id}" data-with="${c.b.id}" data-title="${safe(nameText(c.a.username))} and ${safe(nameText(c.b.username))}">Read</button></span></div>`).join("") || `<p class="muted">No friend chats.</p>`}` +
+      `<h3>🏘️ Group chats</h3>${d.groups.map(g => `<div class="safety-row"><strong>${safe(g.icon)} ${safe(g.name)}</strong><span class="row"><small>${g.messages} message${g.messages === 1 ? "" : "s"}</small>${when(g.lastAt)}<button class="soft" data-safety-group="${safe(g.key)}" data-title="${safe(g.icon)} ${safe(g.name)}">Read</button></span></div>`).join("") || `<p class="muted">No group chats.</p>`}`;
+    if (d && v.tab === "comments") body = d.comments.map(c => `<div class="comment">${personLink(c.userId, c.username, avatarHTML(c.avatar, "tiny"))}<div class="comment-body"><div class="comment-head">${personLink(c.userId, c.username, `<strong>${nameHTML(c.username)}</strong>`)}${when(c.createdAt)}</div>` +
+      `<p>${richText(c.body)}</p><small class="muted">On the post “${safe(c.post.caption)}”${c.post.visibility !== "public" ? ` (${c.post.visibility})` : ""}${c.post.groupKey ? " in a group" : ""}</small><div class="comment-tools"><button class="link-btn" data-safety-comment-delete="${c.id}">🗑️ Delete</button></div></div></div>`).join("") || `<p class="muted">No comments.</p>`;
+    if (d && v.tab === "posts") body = d.posts.length ? `<div class="feed">${d.posts.map(postCard).join("")}</div>` : `<p class="muted">No private or unlisted posts.</p>`;
+    if (d && v.tab === "suspended") body = d.users.map(u => `<div class="safety-row">${who(u)}<span class="row"><small>Until ${safe(untilText(u.suspended))}${u.suspended.reason ? ` · ${safe(u.suspended.reason)}` : ""}</small><button class="soft" data-unsuspend="${u.id}" data-name="${safe(u.username)}">Lift the suspension</button></span></div>`).join("") || `<p class="muted">Nobody is suspended. 🎉</p>`;
+    return top + `<section class="panel">${tabs}${filter}<div class="safety-list">${body}</div></section>`;
+  }
+  // Reading a chat on the Safety page, without being in it. Nobody can tell it was read.
+  async function openSafetyChat(query, title) {
+    const d = await api(`/api/safety/chat?${query}`);
+    const msg = m => m.deleted ? `<div class="msg"><div class="msg-body"><div class="bubble deleted"><span class="b-text">🚫 ${safe(nameText(m.username))} deleted a message</span><small>${timeLabel(m.createdAt)}</small></div></div></div>`
+      : `<div class="msg">${personLink(m.userId, m.username, avatarHTML(m.avatar, "tiny"))}<div class="msg-body"><div class="bubble"><strong>${nameHTML(m.username)}</strong><span class="b-text">${richText(m.body)}</span><small>${timeLabel(m.createdAt)}</small></div></div></div>`;
+    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal tagged-modal" role="dialog" aria-modal="true" aria-labelledby="safetyChatTitle"><div class="row between"><h2 id="safetyChatTitle">🛡️ ${safe(title)}</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
+      `<p class="muted-note">Only you can read this here. Tap someone's picture to open their profile (and suspend them if you need to).</p><div class="chat-log">${d.messages.map(msg).join("") || `<p class="muted">No messages.</p>`}</div></section></div>`;
+    $("#closeModal").onclick = closeModal;
+    $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
+    const log = $(".tagged-modal .chat-log"); log.scrollTop = log.scrollHeight;
+  }
+  // ---- Comments 💬: state.comments[postId] is { open, list, draft, replyTo, replyDraft } once someone opens a post's
+  // comments. replyTo is the comment a reply box is open under; replies are one level deep, so replying to a reply
+  // answers the same comment and starts with @their username.
+  function commentsHTML(p) {
+    const c = state.comments?.[p.id];
+    if (!c?.open) return "";
+    if (!c.list) return `<div class="comments"><p class="muted">Loading comments…</p></div>`;
+    const reaction = (m, r) => `<button class="reaction ${r.mine ? "on" : ""}" data-comment-react="${safe(r.emoji)}" data-comment="${m.id}" data-post-of="${p.id}" title="${safe(r.users.join(", "))}" aria-pressed="${r.mine}" ${state.user ? "" : "disabled"}><span class="emoji">${safe(r.emoji)}</span>${r.count}</button>`;
+    const item = (m, top) => `<div class="comment">${personLink(m.userId, m.username, avatarHTML(m.avatar, "tiny"))}<div class="comment-body">` +
+      `<div class="comment-head">${personLink(m.userId, m.username, `<strong>${nameHTML(m.username)}</strong>`)}<small>${timeLabel(m.createdAt)}</small></div><p>${richText(m.body)}</p>` +
+      `<div class="comment-tools">${m.reactions.map(r => reaction(m, r)).join("")}${state.user ? `<button class="link-btn" data-comment-pick="${m.id}" data-post-of="${p.id}">😊 React</button>` +
+        `<button class="link-btn" data-comment-reply="${top.id}" data-post-of="${p.id}" ${m === top ? "" : `data-tag="${safe(m.username)}"`}>↩️ Reply</button>` : ""}` +
+      `${m.canDelete ? `<button class="link-btn" data-comment-delete="${m.id}" data-post-of="${p.id}">🗑️ Delete</button>` : ""}${state.user && m.userId !== state.user.id ? `<button class="link-btn" data-comment-report="${m.id}">🚩 Report</button>` : ""}</div></div></div>`;
+    const replyBox = top => c.replyTo === top.id ? `<form class="comment-form reply-form row nowrap" data-comment-form="${p.id}" data-reply-to="${top.id}"><input aria-label="Reply to ${safe(nameText(top.username))}" maxlength="500" placeholder="Reply to ${safe(nameText(top.username))}…" autocomplete="off" value="${safe(c.replyDraft || "")}">` +
+      `<button class="primary" type="submit">Reply</button><button class="soft" type="button" data-reply-cancel="${p.id}">Cancel</button></form>` : "";
+    const thread = top => `<div class="thread">${item(top, top)}${top.replies.length || c.replyTo === top.id ? `<div class="replies">${top.replies.map(r => item(r, top)).join("")}${replyBox(top)}</div>` : ""}</div>`;
+    return `<div class="comments">${c.list.length ? c.list.map(thread).join("") : `<p class="muted">No comments yet.${state.user ? " Be the first! 💬" : ""}</p>`}` +
+      (state.user ? `<form class="comment-form row nowrap" data-comment-form="${p.id}"><input aria-label="Write a comment" maxlength="500" placeholder="Write a comment… type @ and a username to tag someone" autocomplete="off" value="${safe(c.draft || "")}"><button class="primary" type="submit">Send</button></form>`
+        : `<p class="muted-note">Sign in to write a comment.</p>`) + `</div>`;
+  }
+  // Every copy of a post on the page (it can be in the feed, a profile, the playlist…), so its comment count stays right.
+  const postCopies = id => [state.posts, state.groupView?.posts, state.person?.posts, state.playlist, state.myPosts?.posts, state.reports?.posts, state.single?.post && [state.single.post]]
+    .flatMap(list => list || []).filter(x => x.id === id);
+  function setComments(postId, d) {
+    const c = (state.comments ||= {})[postId] ||= { open: true };
+    c.list = d.comments;
+    for (const x of postCopies(postId)) x.comments = d.count;
+    render();
+  }
+  async function loadComments(postId) { setComments(postId, await api(`/api/posts/${postId}/comments`)); }
+  async function toggleComments(postId) {
+    const c = (state.comments ||= {})[postId] ||= {};
+    c.open = !c.open; render();
+    if (c.open) await loadComments(postId);
   }
   function postCard(p) {
     const video = p.mediaType?.startsWith("video/");
-    const mine = state.user?.id === p.userId, who = `${avatarHTML(p.avatar)}<span><strong>${safe(p.username)}</strong><br><small>${timeLabel(p.createdAt)}</small></span>`;
+    const mine = state.user?.id === p.userId, who = `${avatarHTML(p.avatar)}<span><strong>${nameHTML(p.username)}</strong><br><small>${timeLabel(p.createdAt)}</small></span>`;
     const code = p.code && !p.inGroup ? `<p class="post-code">🔗 Code <code>${safe(p.code)}</code></p>` : "";
     // Tapping who posted it opens their profile (yours opens your Profile page). Guests can't open profiles.
-    const author = !state.user ? `<span class="post-author">${who}</span>` : `<button class="post-author" ${mine ? `data-page="profile"` : `data-view-person="${p.userId}"`} title="See ${safe(p.username)}'s profile">${who}</button>`;
+    const author = !state.user ? `<span class="post-author">${who}</span>` : `<button class="post-author" ${mine ? `data-page="profile"` : `data-view-person="${p.userId}"`} title="See ${safe(nameText(p.username))}'s profile">${who}</button>`;
     const badge = p.visibility && p.visibility !== "public" ? ` <span class="pill">${VISIBILITY.find(v => v[0] === p.visibility)[1]}</span>` : "";
-    return `<article class="panel post" data-post="${p.id}"><div class="posthead">${author}${badge}${state.user && state.user.id !== p.userId ? `<button class="soft post-block" data-block="${p.userId}" data-name="${safe(p.username)}">🚫 Block</button>` : ""}</div>${postMedia(p)}<p>${safe(p.caption)}</p>${p.description ? `<div class="post-desc clamped">${safe(p.description)}</div>${p.description.length > 150 || p.description.includes("\n") ? `<button class="link-btn" data-desc-toggle="${p.id}">…more</button>` : ""}` : ""}<div class="actions"><button class="soft" data-like="${p.id}" ${!state.user || state.user.id===p.userId?"disabled":""}>${p.liked?"💗 Liked":"🤍 Like"} · ${p.likes}</button>${state.user ? `<button class="soft" data-playlist="${p.id}" aria-pressed="${p.inPlaylist}">${p.inPlaylist ? "✓ In playlist" : "➕ Playlist"}</button>` : ""}${video ? viewerTool("speed", "⏩", "Speed", p.id) + viewerTool("effects", "✨", "Effects", p.id) : ""}${postTools(p)}</div><div class="viewer">${video ? viewerPanel(p.id) : ""}</div>${code}</article>`;
+    return `<article class="panel post" data-post="${p.id}"><div class="posthead">${author}${badge}${state.user && state.user.id !== p.userId ? `<button class="soft post-block" data-block="${p.userId}" data-name="${safe(p.username)}">🚫 Block</button>` : ""}</div>${postMedia(p)}<p>${richText(p.caption)}</p>${p.description ? `<div class="post-desc clamped">${richText(p.description)}</div>${p.description.length > 150 || p.description.includes("\n") ? `<button class="link-btn" data-desc-toggle="${p.id}">…more</button>` : ""}` : ""}<div class="actions"><button class="soft" data-like="${p.id}" ${!state.user || state.user.id===p.userId?"disabled":""}>${p.liked?"💗 Liked":"🤍 Like"} · ${p.likes}</button><button class="soft" data-comments="${p.id}" aria-expanded="${Boolean(state.comments?.[p.id]?.open)}">💬 Comment · ${p.comments ?? 0}</button>${state.user ? `<button class="soft" data-playlist="${p.id}" aria-pressed="${p.inPlaylist}">${p.inPlaylist ? "✓ In playlist" : "➕ Playlist"}</button>` : ""}${video ? viewerTool("speed", "⏩", "Speed", p.id) + viewerTool("effects", "✨", "Effects", p.id) : ""}${postTools(p)}</div><div class="viewer">${video ? viewerPanel(p.id) : ""}</div>${commentsHTML(p)}${code}</article>`;
   }
   function render() {
     applyTheme();
     syncMusic();
     wallet();
-    if (pageGone(state.page) || (state.page === "reports" && !state.user?.admin)) state.page = "feed";
+    if (pageGone(state.page) || (state.page === "reports" && !state.user?.admin) || (state.page === "safety" && !state.user?.creator)) state.page = "feed";
     if (state.page === "person" && !(state.user && state.person)) state.page = "friends";
-    document.querySelectorAll(".nav").forEach(b => { b.classList.toggle("active", b.dataset.page === state.page); b.hidden = pageGone(b.dataset.page) || (b.dataset.page === "reports" && !state.user?.admin); });
+    document.querySelectorAll(".nav").forEach(b => { b.classList.toggle("active", b.dataset.page === state.page); b.hidden = pageGone(b.dataset.page) || (b.dataset.page === "reports" && !state.user?.admin) || (b.dataset.page === "safety" && !state.user?.creator); });
     friendsBadge();
     // In the 18+ zone, Kuchisake-onna takes the place of Nails.
     $('.nav[data-page="nails"]').textContent = zoneOn() ? "👹 Kuchisake-onna" : "💅 Nails";
@@ -1002,14 +1312,16 @@
     $("#cameraBtn").hidden = kidOn();
     stalk();
     let html = "";
-    if (state.page === "feed") {
+    if (state.user?.suspended && !state.user.creator && state.page !== "rules") {
+      html = suspendedPage();
+    } else if (state.page === "feed") {
       html = `<p class="home-name">Mahdiya Faiza Manha</p><p class="home-email">Email me: <a href="mailto:manharuwycse@gmail.com">manharuwycse@gmail.com</a></p>` +
       hero("The world you can show off", "Upload videos you already made, watch posts, and earn 10 MC when someone likes your post.", "WELCOME TO YAKIMMA") +
       `<section class="panel"><div class="row between"><div><h2>Welcome to your feed 🌸</h2><small>Be kind, be creative, and show off your style.</small></div><button class="primary" data-page="create">＋ Upload post</button></div></section>` +
       `<div class="feed">${state.posts.map(postCard).join("") || `<div class="panel empty">No posts yet. Sign in and share the first one! 🌸</div>`}</div>`;
     } else if (state.page === "create") {
       html = hero("Upload your moment", "Choose a video you already made or a photo. Yakimma does not record videos inside the website.", "CREATE A POST") +
-      `<section class="panel"><h2>Make a post</h2>${!state.user?`<p>Please sign in before posting.</p><button class="primary" id="openAuth">Sign in / Create account</button>`:`<form id="postForm"><label for="postType">Post type</label><select id="postType"><option value="video">Video</option><option value="photo">Photo</option><option value="text">Text only</option></select><label for="media">Choose an existing photo or video</label><input id="media" name="media" type="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,video/quicktime"><small>Maximum 100 MB per file in this starter. Uploads are stored on the server running this app.</small><label for="caption">Caption</label><textarea id="caption" maxlength="240" rows="3" required placeholder="Write something fun..."></textarea>` +
+      `<section class="panel"><h2>Make a post</h2>${!state.user?`<p>Please sign in before posting.</p><button class="primary" id="openAuth">Sign in / Create account</button>`:`<form id="postForm"><label for="postType">Post type</label><select id="postType"><option value="video">Video</option><option value="photo">Photo</option><option value="text">Text only</option></select><label for="media">Choose an existing photo or video</label><input id="media" name="media" type="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,video/quicktime"><small>Maximum 100 MB per file in this starter. Uploads are stored on the server running this app.</small><fieldset class="thumb-box" id="thumbBox" hidden><legend>🖼️ Thumbnail</legend><p class="muted-note">This picture shows on your video before it plays. We picked a moment for you. Change it if you like.</p>${thumbPickerHTML()}</fieldset><label for="caption">Caption</label><textarea id="caption" maxlength="240" rows="3" required placeholder="Write something fun..."></textarea>` +
         `<label for="description">Description <small>(optional)</small></label><textarea id="description" maxlength="2000" rows="5" placeholder="Tell people more about your post"></textarea>` +
         `<fieldset class="visibility"><legend>Who can see it?</legend>${VISIBILITY.map(([id, label, about], i) => `<label class="vis-option"><input type="radio" name="visibility" value="${id}" ${i ? "" : "checked"}><span><strong>${label}</strong><small>${about}</small></span></label>`).join("")}</fieldset>` +
         `<div class="actions"><button class="primary" type="submit">Publish post ✨</button><button class="soft" type="button" data-page="feed">Cancel</button></div></form>`}</section>`;
@@ -1026,7 +1338,7 @@
       html = nailsPage();
     } else if (state.page === "profile") {
       html = hero("Your Yakimma profile", "Your posts, wallet, and collection.", "MY PROFILE") +
-      `<section class="panel"><div class="posthead">${state.user?`<button class="avatar-edit" id="editAvatar" aria-label="Change profile picture">${avatarHTML(state.user.avatar,"big")}<span class="avatar-edit-badge" aria-hidden="true">✏️</span></button>`:avatarHTML(null,"big")}<div><h2 style="margin:0">${state.user?safe(state.user.username):"Guest"}</h2><small>${state.user?`🔢 Account number ${state.user.accountNumber}`:"Browsing as a guest"}</small></div></div>${state.user?`<div class="row"><span class="pill">🐱 ${state.user.mc} MC</span><span class="pill">💌 ${state.user.lc} LC</span><span class="pill">🎁 ${state.inventory.length} items</span><span class="pill">👯 ${state.social.friends.length} friend${state.social.friends.length===1?"":"s"}</span>${identityPills(state.user)}${followPills(state.user.id, state.social.follows?.followers ?? 0, state.social.follows?.following ?? 0, state.user.username)}</div><div class="actions"><button class="soft" id="editAvatarBtn">🎨 Change picture</button><button class="soft" id="changeUsername">✏️ Change Username</button><button class="danger" id="logout">Sign out</button></div>`:`<button class="primary" id="openAuth">Create account / Sign in</button>`}</section><section class="panel"><h3>My collection</h3>${state.inventory.length?[...state.products.filter(p=>state.inventory.includes(p.id)).map(p=>`${p.icon} ${safe(p.name)}`),...state.nailOptions.arts.filter(a=>a.item&&state.inventory.includes(a.item)).map(a=>`${a.icon} ${safe(a.name)} sticker`),...state.themes.filter(t=>t.gift&&state.inventory.includes(t.item)).map(t=>`${t.icon} ${safe(t.name)} theme`)].map(x=>`<span class="pill">${x}</span> `).join(""):`<p class="muted">Visit the shop to collect something cute.</p>`}</section>` +
+      `<section class="panel"><div class="posthead">${state.user?`<button class="avatar-edit" id="editAvatar" aria-label="Change profile picture">${avatarHTML(state.user.avatar,"big")}<span class="avatar-edit-badge" aria-hidden="true">✏️</span></button>`:avatarHTML(null,"big")}<div><h2 style="margin:0">${state.user?nameHTML(state.user.username):"Guest"}</h2><small>${state.user?`🔢 Account number ${state.user.accountNumber}`:"Browsing as a guest"}</small></div></div>${state.user?`<div class="row"><span class="pill">🐱 ${state.user.mc} MC</span><span class="pill">💌 ${state.user.lc} LC</span><span class="pill">🎁 ${state.inventory.length} items</span><span class="pill">👯 ${state.social.friends.length} friend${state.social.friends.length===1?"":"s"}</span>${identityPills(state.user)}${followPills(state.user.id, state.social.follows?.followers ?? 0, state.social.follows?.following ?? 0, state.user.username)}</div>${assistantLines(state.user, true)}<div class="actions"><button class="soft" id="editAvatarBtn">🎨 Change picture</button><button class="soft" id="changeUsername">✏️ Change Username</button>${state.user.admin?`<button class="soft" id="changeDisplayName">🪪 Display name</button>`:""}<button class="danger" id="logout">Sign out</button></div>`:`<button class="primary" id="openAuth">Create account / Sign in</button>`}</section><section class="panel"><h3>My collection</h3>${state.inventory.length?[...state.products.filter(p=>state.inventory.includes(p.id)).map(p=>`${p.icon} ${safe(p.name)}`),...state.nailOptions.arts.filter(a=>a.item&&state.inventory.includes(a.item)).map(a=>`${a.icon} ${safe(a.name)} sticker`),...state.themes.filter(t=>t.gift&&state.inventory.includes(t.item)).map(t=>`${t.icon} ${safe(t.name)} theme`)].map(x=>`<span class="pill">${x}</span> `).join(""):`<p class="muted">Visit the shop to collect something cute.</p>`}</section>` +
       (state.user ? `<section class="panel"><h3>My nails 💅</h3>${receivedGallery(3)}</section>` + playlistSection() + myPostsSection() : "");
     } else if (state.page === "pictures") {
       html = picturesPage();
@@ -1042,6 +1354,10 @@
       html = aboutPage();
     } else if (state.page === "ads") {
       html = adsPage();
+    } else if (state.page === "safety") {
+      html = safetyPage();
+    } else if (state.page === "rules") {
+      html = rulesPage();
     } else if (state.page === "settings") {
       html = settingsPage();
     }
@@ -1056,8 +1372,8 @@
   const kidOn = () => Boolean(state.user?.kid?.on);
   // Pages guests don't see, pages that aren't in the 18+ zone or the kiddy zone, and pages that are only in the kiddy
   // zone: they leave the menu, and links to them say so instead of opening them.
-  const GUEST_GONE = ["pictures", "settings", "codes", "reports"], ZONE_GONE = ["shop", "codes", "about", "ads"];
-  const KID_GONE = ["pictures", "groups", "codes", "about", "ads", "reports"], KID_ONLY = ["learn"];
+  const GUEST_GONE = ["pictures", "settings", "codes", "reports", "safety"], ZONE_GONE = ["shop", "codes", "about", "ads"];
+  const KID_GONE = ["pictures", "groups", "codes", "about", "ads", "reports", "safety"], KID_ONLY = ["learn"];
   const pageGone = page => (!state.user && GUEST_GONE.includes(page)) || (zoneOn() && ZONE_GONE.includes(page)) || (kidOn() ? KID_GONE.includes(page) : KID_ONLY.includes(page));
   const goneNote = page => !state.user && GUEST_GONE.includes(page) ? `🔐 Sign in to use ${PAGE_NAMES[page]}.`
     : kidOn() ? `🧸 ${PAGE_NAMES[page]} isn't in the kiddy zone.` : KID_ONLY.includes(page) ? `🧸 ${PAGE_NAMES[page]} is only in the kiddy zone.`
@@ -1099,8 +1415,11 @@
     }
     if (step === "email") $("#adultEmailForm").onsubmit = async e => {
       e.preventDefault();
-      const email = $("#adultEmail").value.trim();
-      try { const d = await api("/api/adult/email", send("POST", { email, confirm: true })); adultModal("code", { email, testCode: d.testCode }); } catch (err) { fail(err); }
+      // The button waits while the email is sent, so pressing it again can't send a second code (only the newest works).
+      const email = $("#adultEmail").value.trim(), btn = $("#adultEmailForm [type=submit]");
+      btn.disabled = true; btn.textContent = "Sending…";
+      try { const d = await api("/api/adult/email", send("POST", { email, confirm: true })); adultModal("code", { email, testCode: d.testCode }); }
+      catch (err) { fail(err); btn.disabled = false; btn.textContent = "Send my code"; }
     };
     if (step === "code") {
       $("#adultBack").onclick = () => adultModal("email");
@@ -1175,12 +1494,15 @@
         try { await enteredKidZone(await api("/api/kid", send("PUT", { on: true }))); } catch (err) { fail(err); }
       };
     }
-    // With `reset`, the server sends the code to the parent's email, so no email is given.
-    const sendCode = async email => {
-      try { const d = await api("/api/kid/email", send("POST", { email })); kidModal("code", { reset, email, testCode: d.testCode }); } catch (err) { fail(err); }
+    // With `reset`, the server sends the code to the parent's email, so no email is given. The button waits while the
+    // email is sent, so pressing it again can't send a second code (only the newest code works).
+    const sendCode = async (email, btn) => {
+      btn.disabled = true; btn.textContent = "Sending…"; fail({ message: "" });
+      try { const d = await api("/api/kid/email", send("POST", { email })); kidModal("code", { reset, email, testCode: d.testCode }); }
+      catch (err) { fail(err); btn.disabled = false; btn.textContent = "Send the code"; }
     };
-    if (step === "email" && reset) $("#kidSend").onclick = () => sendCode();
-    if (step === "email" && !reset) $("#kidEmailForm").onsubmit = e => { e.preventDefault(); sendCode($("#kidEmail").value.trim()); };
+    if (step === "email" && reset) $("#kidSend").onclick = () => sendCode(undefined, $("#kidSend"));
+    if (step === "email" && !reset) $("#kidEmailForm").onsubmit = e => { e.preventDefault(); sendCode($("#kidEmail").value.trim(), $("#kidEmailForm [type=submit]")); };
     if (step === "code") {
       $("#kidBack").onclick = () => kidModal("email", { reset });
       $("#kidCodeForm").onsubmit = async e => {
@@ -1279,6 +1601,75 @@
       } catch (err) { $("#usernameError").textContent = err.message; }
     };
     $("#newUsername").focus();
+  }
+  // A nickname for a friend that only you see, shown instead of their name everywhere. Empty takes it off.
+  function nicknameModal(friendId, username) {
+    const current = state.social.nicknames?.[username.toLowerCase()] || "";
+    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="nicknameTitle"><div class="row between"><h2 id="nicknameTitle">🏷️ Nickname for @${safe(username)}</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
+      `<p>Give your friend a nickname that <strong>only you</strong> can see. It shows instead of their name everywhere on Yakimma, just for you. Everyone else still sees their normal name.</p>` +
+      `<form id="nicknameForm"><label for="newNickname">Nickname</label><input id="newNickname" maxlength="60" autocomplete="off" value="${safe(current)}">` +
+      `<p class="muted-note">Up to 30 characters. Spaces and emojis are fine. Leave it empty to take the nickname off.</p><div class="actions"><button class="primary" type="submit">Save</button></div></form>` +
+      `<p class="muted-note error-text" id="nicknameError" role="alert"></p></section></div>`;
+    $("#closeModal").onclick = closeModal;
+    $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
+    $("#nicknameForm").onsubmit = async e => {
+      e.preventDefault();
+      try {
+        const d = await api(`/api/friends/${friendId}/nickname`, send("PUT", { nickname: $("#newNickname").value }));
+        state.social.nicknames = d.nicknames; closeModal();
+        const nick = d.nicknames[username.toLowerCase()];
+        toast(nick ? `Only you see ${username} as ${nick}. 🏷️` : `${username}'s nickname is gone. 🏷️`);
+      } catch (err) { $("#nicknameError").textContent = err.message; }
+    };
+    $("#newNickname").focus();
+  }
+  // ---- 📜 Rules: on their own page under Settings. Change them here: [icon, rule, more about it, what can happen]. ----
+  const RULES = [
+    ["🎬", "Do not put the wrong videos in the wrong zone", "Example: you put an inappropriate video in the kiddy zone.", "Your account may get a 3-day suspension."],
+    ["🛑", "Do NOT harass people", "It may make people sad.", "It can cause a 5-day suspension."],
+    ["😊", "Stay friendly", "Do not make arguments."],
+    ["💖", "Be kind", "No bullying, mean words, or making fun of anyone."],
+    ["🔐", "Keep private things private", "Never share your password, your address, your phone number or your school."],
+    ["🙅", "Be yourself", "Don't pretend to be someone else, and don't copy other people's usernames."],
+    ["📸", "Only post what's yours", "Post photos and videos you made, or that you're allowed to share."],
+    ["📢", "No spam", "Don't post the same thing again and again, or beg people for likes or MC."],
+    ["🚩", "Report it, don't fight it", "If you see something bad, tap 🚩 Report and the admins will look at it."],
+    ["🤥", "False reporting can cause suspensions", "Be careful! Lying is bad!"],
+    ["🛠️", "The admins keep Yakimma safe", "They can delete posts, comments, messages and groups that break the rules."]
+  ];
+  function rulesPage() {
+    return hero("Read The Rules!! 📜", "Everyone on Yakimma follows these rules, so it stays fun and safe for everyone.", "RULES") +
+      `<section class="panel"><ol class="rules">${RULES.map(([icon, title, about, penalty]) => `<li><span class="rule-icon" aria-hidden="true">${icon}</span><div><strong>${safe(title)}</strong><p>${safe(about)}</p>${penalty ? `<p class="rule-penalty">⚠️ ${safe(penalty)}</p>` : ""}</div></li>`).join("")}</ol>` +
+      `<p class="notice">🛡️ To keep Yakimma safe, the creator can see every chat, comment and post, even private ones, and can suspend accounts that break the rules.</p></section>`;
+  }
+  // Right after making an account, a pop-up in front of everything sends you to the rules.
+  function readTheRules() {
+    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal rules-modal" role="dialog" aria-modal="true" aria-labelledby="rulesTitle">` +
+      `<div class="rules-pop" aria-hidden="true">📜</div><h2 id="rulesTitle">Read The Rules!!</h2><p>Before you start, read Yakimma's rules. They keep Yakimma fun and safe for everyone.</p>` +
+      `<div class="actions"><button class="primary" id="goRules">📜 Read the rules</button></div></section></div>`;
+    $("#goRules").onclick = () => { closeModal(); Object.assign(state, { page: "rules", notice: "", chat: null, groupView: null }); render(); window.scrollTo(0, 0); };
+    $("#goRules").focus();
+  }
+  // Admins (the creator too) can have a display name as well as their username.
+  function displayNameModal() {
+    const u = state.user, current = state.displayNames[u.username.toLowerCase()] || "";
+    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="displayNameTitle"><div class="row between"><h2 id="displayNameTitle">🪪 Display name</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
+      `<p>As an admin, you can have a display name as well as your username. Everyone sees your display name first, with <strong>@${safe(u.username)}</strong> after it.</p>` +
+      `<form id="displayNameForm"><label for="newDisplayName">Display name</label><input id="newDisplayName" maxlength="60" autocomplete="off" value="${safe(current)}">` +
+      `<p class="muted-note">Up to 30 characters. Spaces and emojis are fine. Leave it empty to only show your username.</p><div class="actions"><button class="primary" type="submit">Save</button></div></form>` +
+      `<p class="muted-note error-text" id="displayNameError" role="alert"></p></section></div>`;
+    $("#closeModal").onclick = closeModal;
+    $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
+    $("#displayNameForm").onsubmit = async e => {
+      e.preventDefault();
+      try {
+        const d = await api("/api/me/display-name", send("PUT", { displayName: $("#newDisplayName").value }));
+        closeModal(); state.user = d.user; state.displayNames = d.displayNames; wallet(); render();
+        const shown = d.displayNames[u.username.toLowerCase()];
+        toast(shown ? `Your display name is now ${shown}! 🪪` : "Your display name is gone. Everyone sees your username. 🪪");
+      } catch (err) { $("#displayNameError").textContent = err.message; }
+    };
+    $("#newDisplayName").focus();
   }
   async function signedOut() {
     Object.assign(state, { groupView: null, chat: null, myPosts: null, playlist: null, pictures: null, learn: null, person: null, friendSearch: null, people: null });
@@ -1896,7 +2287,7 @@
     s.onerror = () => { shotLib = null; s.remove(); reject(new Error("The camera couldn't start. Check your connection and try again.")); };
     document.head.append(s);
   });
-  const PAGE_NAMES = { feed: "🏡 Feed", create: "✨ Upload", profile: "🌷 Profile", pictures: "🌇 Pictures", settings: "⚙️ Settings", friends: "👯 Friends", groups: "🏘️ Groups", nails: "💅 Nail Salon", person: "👤 Profile", post: "🔗 Post", learn: "📚 Learn!", reports: "🚩 Reports", shop: "🛍️ Shop", codes: "👩‍💻 Codes", about: "🎀 About The Creator", ads: "🎉 Advertisement" };
+  const PAGE_NAMES = { rules: "📜 Rules", safety: "🛡️ Safety", feed: "🏡 Feed", create: "✨ Upload", profile: "🌷 Profile", pictures: "🌇 Pictures", settings: "⚙️ Settings", friends: "👯 Friends", groups: "🏘️ Groups", nails: "💅 Nail Salon", person: "👤 Profile", post: "🔗 Post", learn: "📚 Learn!", reports: "🚩 Reports", shop: "🛍️ Shop", codes: "👩‍💻 Codes", about: "🎀 About The Creator", ads: "🎉 Advertisement" };
   // Where a picture was taken, shown with it in Pictures.
   function placeName() {
     const c = state.chat, g = state.groupView?.group, client = state.page === "nails" && state.salon && salonClient();
@@ -1954,7 +2345,8 @@
   const ADS = [
     { icon: "💼", title: "My Dad's Business", name: "Biponi Labs", url: "https://www.facebook.com/people/Biponi-Labs/61594900898203/?sk=followers" },
     { icon: "▶️", title: "Follow Me On YouTube!", name: "@Offical-manhatukfayay_theCutie", url: "https://www.youtube.com/@Offical-manhatukfayay_theCutie" },
-    { icon: "📲", title: "Install This App!", name: "Fax Hero: Send Fax from iPhone", url: "https://apps.apple.com/us/app/fax-hero-send-fax-from-iphone/id6670707717" }
+    { icon: "📲", title: "Install This App!", name: "Fax Hero: Send Fax from iPhone", url: "https://apps.apple.com/us/app/fax-hero-send-fax-from-iphone/id6670707717" },
+    { icon: "🌌", title: "Play My Sekai Games!", name: "Sekai", url: "https://sekai.ai/?creator=18041026" }
   ];
   function adsPage() {
     return hero("Advertisement 🎉", "", "ADVERTISEMENT") +
@@ -1990,7 +2382,7 @@
     (state.countries || []).map(c => `<option value="${c.code}">${c.flag} ${safe(c.name)}</option>`).join("") + `</select>` +
     `<p class="muted-note">🌍 Everyone can see your religion and country on your profile.</p>`;
   const identityPills = u => [state.countries?.find(c => c.code === u.country), state.religions?.find(r => r.id === u.religion)]
-    .filter(Boolean).map(x => `<span class="pill">${x.flag || x.icon} ${safe(x.name)}</span>`).join("");
+    .filter(Boolean).map(x => `<span class="pill" title="${safe(x.name)}">${x.flag || x.icon}<span class="thing-label"> ${safe(x.name)}</span></span>`).join("");
   // Accounts made before religion and country were asked for choose them once. The pop-up can't be closed until they do.
   function identityModal() {
     if ($("#identityForm")) return;
@@ -2042,6 +2434,7 @@
         await api("/api/" + mode, send("POST", { username, password, ...identity }));
         closeModal(); await refresh(); await loadPageData();
         toast(mode === "signup" ? `Welcome to Yakimma, ${state.user.username}! 🌸 Your account number is ${state.user.accountNumber}.` : `Welcome back, ${state.user.username}! 🩵`);
+        if (mode === "signup") readTheRules();
       }
       catch (err) { $("#authError").textContent = err.message; $("#authError").className = "notice error"; }
     };
@@ -2050,6 +2443,13 @@
   // Profile picture editor: an emoji avatar, or a photo you drag and zoom to fit the circle.
   function openAvatarEditor() {
     const o = state.avatarOptions, current = state.user.avatar, C = 480;
+    if (current.fixed) {
+      $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal avatar-modal" role="dialog" aria-modal="true" aria-labelledby="avatarTitle"><div class="row between"><h2 id="avatarTitle">🎨 Your profile picture</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
+        `<div class="avatar-preview">${avatarHTML(current, "huge")}</div><p class="notice">🔒 Your profile picture is fixed, so it can't be changed.</p></section></div>`;
+      $("#closeModal").onclick = closeModal;
+      $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
+      return;
+    }
     let emoji = current.emoji, bg = current.bg, img = null, zoom = 1, ox = 0, oy = 0;
     $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal avatar-modal" role="dialog" aria-modal="true" aria-labelledby="avatarTitle"><div class="row between"><h2 id="avatarTitle">🎨 Your profile picture</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
       (state.user.admin ? `<p class="notice">🛠️ You're an admin, so everyone sees 🛠️ as your picture. Only the background you pick here shows.</p>` : "") +
@@ -2137,12 +2537,13 @@
   }
   function toggleAccountMenu() {
     if ($("#accountMenu")) return $("#accountMenu").remove();
-    $(".top-actions").insertAdjacentHTML("beforeend", `<div class="account-menu" id="accountMenu" role="menu"><div class="account-menu-head">${avatarHTML(state.user.avatar)}<div><strong>${safe(state.user.username)}</strong><small>🐱 ${state.user.mc} MC · 💌 ${state.user.lc} LC</small></div></div><button class="menu-item" role="menuitem" data-page="profile">🌷 My profile</button><button class="menu-item" role="menuitem" id="menuAvatar">🎨 Change picture</button>${kidOn() && !state.user.admin ? `<p class="menu-note">🧸 In the kiddy zone, only a parent can sign out, from 🌷 My profile.</p>` : `<button class="menu-item signout" role="menuitem" id="logout">🚪 Sign out</button>`}</div>`);
+    $(".top-actions").insertAdjacentHTML("beforeend", `<div class="account-menu" id="accountMenu" role="menu"><div class="account-menu-head">${avatarHTML(state.user.avatar)}<div><strong>${nameHTML(state.user.username)}</strong><small>🐱 ${state.user.mc} MC · 💌 ${state.user.lc} LC</small></div></div><button class="menu-item" role="menuitem" data-page="profile">🌷 My profile</button><button class="menu-item" role="menuitem" id="menuAvatar">🎨 Change picture</button>${kidOn() && !state.user.admin ? `<p class="menu-note">🧸 In the kiddy zone, only a parent can sign out, from 🌷 My profile.</p>` : `<button class="menu-item signout" role="menuitem" id="logout">🚪 Sign out</button>`}</div>`);
     $("#accountMenu button").focus();
   }
   document.addEventListener("keydown", e => {
     if (e.key !== "Escape") return;
     if ($("#accountMenu")) { $("#accountMenu").remove(); $("#accountBtn").focus(); }
+    else if ($("#notifMenu")) { $("#notifMenu").remove(); $("#bellBtn").focus(); }
     else if ($("#modalback")) closeModal();
     else if (state.chat?.selected) { state.chat.selected = null; drawLog(); }
     else if (state.chat?.editing) { Object.assign(state.chat, { editing: null, draft: "" }); render(); }
@@ -2151,6 +2552,9 @@
     const hit = e.target.closest("[data-nail-i]");
     if (hit && state.salon) { state.salon.applyAll = false; state.salon.selected = Number(hit.dataset.nailI); render(); return; }
     if (!e.target.closest("#accountBtn")) $("#accountMenu")?.remove();
+    if (!e.target.closest("#bellBtn, #notifMenu")) $("#notifMenu")?.remove();
+    const tag = e.target.closest("[data-mention]");
+    if (tag) { e.preventDefault(); try { await openTag(tag.dataset.mention); } catch (err) { toast(err.message, true); } return; }
     // Tapping anywhere outside the selected message closes its actions.
     if (state.chat?.selected && !e.target.closest(".msg-body") && !e.target.closest("#modalroot")) { state.chat.selected = null; drawLog(); }
     const b=e.target.closest("button"); if(!b)return;
@@ -2187,6 +2591,29 @@
       if(b.id==="kidForgot"){kidModal("email",{reset:true});return;}
       if(b.id==="kidFaceBtn"){kidFaceModal();return;}
       if(b.id==="changeUsername"){usernameModal();return;}
+      if(b.id==="changeDisplayName"){displayNameModal();return;}
+      if(b.id==="bellBtn"){await toggleBell();return;}
+      if(b.dataset.notif){const n=state.notifications?.find(x=>x.id===Number(b.dataset.notif));if(n)await openNotification(n);return;}
+      if(b.dataset.comments){await toggleComments(Number(b.dataset.comments));return;}
+      if(b.dataset.commentReact){setComments(Number(b.dataset.postOf),await api(`/api/comments/${b.dataset.comment}/reactions`,send("POST",{emoji:b.dataset.commentReact})));return;}
+      if(b.dataset.commentPick){const id=b.dataset.commentPick,postId=Number(b.dataset.postOf);openEmojiPicker("😊 React to the comment",async emoji=>{try{setComments(postId,await api(`/api/comments/${id}/reactions`,send("POST",{emoji})));}catch(err){toast(err.message,true);}});return;}
+      if(b.dataset.commentReport){reportModal(Number(b.dataset.commentReport),"comment");return;}
+      if(b.dataset.suspend){suspendModal(Number(b.dataset.suspend),b.dataset.name,b.dataset.reason||"");return;}
+      if(b.dataset.unsuspend){if(!confirm(`Lift ${b.dataset.name}'s suspension? They can use Yakimma again straight away.`))return;await api(`/api/users/${b.dataset.unsuspend}/suspend`,{method:"DELETE"});await suspensionsChanged();toast(`${b.dataset.name} can use Yakimma again. ✅`);return;}
+      if(b.dataset.keepComment){state.reports=await api(`/api/reports/comments/${b.dataset.keepComment}`,{method:"DELETE"});toast("Kept. The reports on that comment are cleared ✅");return;}
+      if(b.dataset.reportCommentDelete){if(!confirm("Delete this comment? Any replies to it go too. This can't be undone."))return;await api(`/api/comments/${b.dataset.reportCommentDelete}`,{method:"DELETE"});state.reports=await api("/api/reports");toast("The comment is deleted. 🗑️");return;}
+      if(b.dataset.safetyTab){Object.assign(state.safety||={user:""},{tab:b.dataset.safetyTab,data:null});render();await loadSafety();render();return;}
+      if(b.id==="safetyClear"){state.safety.user="";state.safety.data=null;render();await loadSafety();render();return;}
+      if(b.dataset.safetyChat){await openSafetyChat(`a=${b.dataset.safetyChat}&b=${b.dataset.with}`,b.dataset.title);return;}
+      if(b.dataset.safetyGroup){await openSafetyChat(`group=${encodeURIComponent(b.dataset.safetyGroup)}`,b.dataset.title);return;}
+      if(b.dataset.safetyCommentDelete){if(!confirm("Delete this comment? Any replies to it go too. This can't be undone."))return;await api(`/api/comments/${b.dataset.safetyCommentDelete}`,{method:"DELETE"});await loadSafety();toast("The comment is deleted. 🗑️");return;}
+      if(b.dataset.postThumb){const p=postCopies(Number(b.dataset.postThumb))[0];if(p)thumbModal(p);return;}
+      if(b.dataset.commentReply){const postId=Number(b.dataset.postOf),c=state.comments[postId];Object.assign(c,{replyTo:Number(b.dataset.commentReply),replyDraft:b.dataset.tag?`@${b.dataset.tag} `:""});render();const i=$(`[data-reply-to="${c.replyTo}"] input`);if(i){i.focus();i.setSelectionRange(i.value.length,i.value.length);}return;}
+      if(b.dataset.replyCancel){Object.assign(state.comments[Number(b.dataset.replyCancel)],{replyTo:null,replyDraft:""});render();return;}
+      if(b.dataset.commentDelete){if(!confirm("Delete this comment? Any replies to it go too. This can't be undone."))return;setComments(Number(b.dataset.postOf),await api(`/api/comments/${b.dataset.commentDelete}`,{method:"DELETE"}));return;}
+      if(b.dataset.nickname){nicknameModal(Number(b.dataset.nickname),b.dataset.name);return;}
+      if(b.dataset.assistant){const d=await api("/api/me/assistant",send("PUT",{userId:Number(b.dataset.assistant)}));state.user=d.user;state.person=await api(`/api/users/${state.person.user.id}`);toast(`${nameText(state.person.user.username)} is now your assistant! 🤝`);return;}
+      if(b.dataset.assistantRemove){const d=await api("/api/me/assistant",send("PUT",{userId:null}));state.user=d.user;if(state.page==="person"&&state.person)state.person=await api(`/api/users/${state.person.user.id}`);toast("You don't have an assistant now. 🤝");return;}
       if(b.dataset.viewPerson){await openPerson(Number(b.dataset.viewPerson));return;}
       if(b.dataset.postVisibility){visibilityModal(Number(b.dataset.postVisibility));return;}
       if(b.dataset.descToggle){const d=b.previousElementSibling;b.textContent=d.classList.toggle("clamped")?"…more":"Show less";return;}
@@ -2217,7 +2644,7 @@
       if(b.dataset.deletePicture){if(!confirm("Delete this picture?"))return;state.pictures=await api(`/api/pictures/${b.dataset.deletePicture}`,{method:"DELETE"});closeModal();toast("Picture deleted.");return;}
       if(b.dataset.useTheme){await useTheme(b.dataset.useTheme);return;}
       // Joining takes you straight into the group's chat.
-      if(b.dataset.joinGroup){setGroups(await api(`/api/groups/${b.dataset.joinGroup}/join`,{method:"POST"}));await openGroup(b.dataset.joinGroup);toast("You joined the group! 🎉 Say hi in the chat.");return;}
+      if(b.dataset.joinGroup){closeModal();setGroups(await api(`/api/groups/${b.dataset.joinGroup}/join`,{method:"POST"}));await openGroup(b.dataset.joinGroup);toast("You joined the group! 🎉 Say hi in the chat.");return;}
       if(b.dataset.openGroup){await openGroup(b.dataset.openGroup);return;}
       if(b.dataset.members){if(!state.user){openAuth("login");return;}await openMembers(b.dataset.members);return;}
       if(b.dataset.groupTab&&state.groupView){state.groupView.tab=b.dataset.groupTab;render();if(b.dataset.groupTab==="chat"){showChat();await pollChat();}return;}
@@ -2286,6 +2713,16 @@
     const wheel = e.target.dataset.wheelLight;
     if (wheel) setWheel(wheel, { ...wheelColour(wheel), v: Number(e.target.value) / 100 });
   });
+  // Choosing a video to post shows its thumbnail picker.
+  document.addEventListener("change", e => {
+    if (e.target.id !== "media") return;
+    const file = e.target.files[0], box = $("#thumbBox"), video = file?.type.startsWith("video/");
+    state.createThumb = null;
+    box.hidden = !video;
+    if (!video) return;
+    box.innerHTML = box.innerHTML.replace(/<div class="thumb-picker">[\s\S]*$/, thumbPickerHTML());
+    wireThumbPicker(box, URL.createObjectURL(file), blob => { state.createThumb = blob; }, true);
+  });
   document.addEventListener("change", e => {
     if (!state.salon) return;
     if (e.target.id === "applyAll") { state.salon.applyAll = e.target.checked; render(); }
@@ -2306,7 +2743,34 @@
   });
   document.addEventListener("pointermove", e => { if (state.salon?.drag) salonDrag(e); });
   for (const type of ["pointerup", "pointercancel"]) document.addEventListener(type, () => { if (state.salon?.drag) { state.salon.drag = null; render(); } });
+  // What's typed in a comment box is kept, so the page drawing itself again doesn't wipe it.
+  document.addEventListener("input", e => {
+    const form = e.target.closest("[data-comment-form]");
+    if (form) ((state.comments ||= {})[form.dataset.commentForm] ||= {})[form.dataset.replyTo ? "replyDraft" : "draft"] = e.target.value;
+  });
   document.addEventListener("submit", async e=>{
+    if (e.target.id === "safetyFilter") {
+      e.preventDefault();
+      Object.assign(state.safety, { user: $("#safetyUser").value.trim(), data: null }); render();
+      try { await loadSafety(); render(); } catch (err) { toast(err.message, true); }
+      return;
+    }
+    const commentForm = e.target.closest("[data-comment-form]");
+    if (commentForm) {
+      e.preventDefault();
+      const postId = Number(commentForm.dataset.commentForm), parentId = commentForm.dataset.replyTo ? Number(commentForm.dataset.replyTo) : null;
+      const body = commentForm.querySelector("input").value.trim(), btn = commentForm.querySelector("[type=submit]"), c = state.comments[postId];
+      if (!body) return;
+      btn.disabled = true;
+      try {
+        const d = await api(`/api/posts/${postId}/comments`, send("POST", { body, parentId }));
+        if (parentId) Object.assign(c, { replyTo: null, replyDraft: "" }); else c.draft = "";
+        setComments(postId, d);
+        if (!parentId) $(`[data-comment-form="${postId}"]:not([data-reply-to]) input`)?.focus();
+      }
+      catch (err) { btn.disabled = false; toast(err.message, true); }
+      return;
+    }
     if(e.target.id==="kidOffForm"){
       e.preventDefault();
       try { const d=await api("/api/kid",send("PUT",{on:false,password:$("#kidOffPass").value}));await zoneChanged(d.user);toast("The kiddy zone is off. Welcome back! 🌸"); }
@@ -2364,6 +2828,7 @@
     if(type!=="text" && !file)return toast("Choose a file, or select Text only.",true);
     const visibility=$('input[name="visibility"]:checked').value;
     const body=new FormData();body.append("caption",caption);body.append("description",$("#description").value.trim());body.append("visibility",visibility);if(file)body.append("media",file);
+    if(file?.type.startsWith("video/")&&state.createThumb)body.append("thumb",state.createThumb,"thumb.jpg");
     try {
       const d=await api("/api/posts",{method:"POST",body});state.notice="";await refresh();
       // Public posts go to the feed; unlisted and private ones only show on your profile.

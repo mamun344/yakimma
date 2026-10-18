@@ -222,6 +222,55 @@ CREATE TABLE IF NOT EXISTS code_redemptions (
   redeemed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY(user_id, code)
 );
+-- Comments on posts. Anyone who can see a post can comment on it.
+CREATE TABLE IF NOT EXISTS comments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS comments_post ON comments(post_id, id);
+CREATE TABLE IF NOT EXISTS comment_reactions (
+  comment_id INTEGER NOT NULL REFERENCES comments(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  emoji TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(comment_id, user_id, emoji)
+);
+-- What the 🔔 bell shows someone (user_id): another person (actor_id) tagged them, sent or accepted a friend request,
+-- followed them, liked or commented on their post, reacted to their message or comment, or made them their assistant.
+-- kind is tag, request, friend, follow, like, comment, reply, reaction or assistant; the post, comment or message is the one it's about.
+CREATE TABLE IF NOT EXISTS notifications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  actor_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  post_id INTEGER REFERENCES posts(id) ON DELETE CASCADE,
+  comment_id INTEGER REFERENCES comments(id) ON DELETE CASCADE,
+  message_id INTEGER REFERENCES messages(id) ON DELETE CASCADE,
+  emoji TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  read_at TEXT
+);
+CREATE INDEX IF NOT EXISTS notifications_user ON notifications(user_id, id);
+-- Nicknames people give their friends (see /api/friends/:userId/nickname). Only the person who gave one sees it, and
+-- only while they're still friends.
+-- Someone reporting a comment, like post_reports. "Something else" has the reporter's own words in details.
+CREATE TABLE IF NOT EXISTS comment_reports (
+  comment_id INTEGER NOT NULL REFERENCES comments(id) ON DELETE CASCADE,
+  reporter_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  reason TEXT NOT NULL,
+  details TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(comment_id, reporter_id)
+);
+CREATE TABLE IF NOT EXISTS nicknames (
+  owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  friend_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  nickname TEXT NOT NULL,
+  PRIMARY KEY(owner_id, friend_id)
+);
 `);
 // Databases created by older versions need the newer user columns.
 const userColumns = db.prepare("PRAGMA table_info(users)").all().map(c => c.name);
@@ -252,9 +301,27 @@ for (const [name, definition] of [
   ["country", "TEXT"],
   // The child's and the parent's birth dates (YYYY-MM-DD), filled in when a parent sets up the kiddy zone. Never shared.
   ["kid_birth_date", "TEXT"],
-  ["parent_birth_date", "TEXT"]
+  ["parent_birth_date", "TEXT"],
+  // A name shown along with the username. Only admins can have one (see canHaveDisplayName).
+  ["display_name", "TEXT"],
+  // Someone this person trusts, shown as their 🤝 Assistant on their profile (see /api/me/assistant).
+  ["assistant_id", "INTEGER REFERENCES users(id) ON DELETE SET NULL"],
+  // A suspension the creator gave: until when (milliseconds since 1970) and why. See /api/users/:id/suspend.
+  ["suspended_until", "INTEGER"],
+  ["suspend_reason", "TEXT"]
 ]) {
   if (!userColumns.includes(name)) db.exec(`ALTER TABLE users ADD COLUMN ${name} ${definition}`);
+}
+// A reply to a comment has the comment it answers. Replies are one level deep, and go when that comment goes.
+if (!db.prepare("PRAGMA table_info(comments)").all().some(c => c.name === "parent_id")) db.exec("ALTER TABLE comments ADD COLUMN parent_id INTEGER REFERENCES comments(id) ON DELETE CASCADE");
+// The creator's account used to be called Manhatukfayay. Now its username is Creator and Manhatukfayay is its display
+// name. Only the creator can be called Creator, so anyone who already was becomes user<id> first.
+{
+  const creator = db.prepare("SELECT id FROM users WHERE username='manhatukfayay'").get();
+  if (creator) db.transaction(() => {
+    db.prepare("UPDATE users SET username='user' || id WHERE username='creator' AND id<>?").run(creator.id);
+    db.prepare("UPDATE users SET username='Creator', display_name=COALESCE(display_name,'Manhatukfayay') WHERE id=?").run(creator.id);
+  })();
 }
 // Posts made inside a group have its key (see findGroup) and only show in that group, never on the main feed.
 if (!db.prepare("PRAGMA table_info(posts)").all().some(c => c.name === "group_key")) db.exec("ALTER TABLE posts ADD COLUMN group_key TEXT");
@@ -264,6 +331,10 @@ for (const table of ["posts", "community_groups"]) {
 }
 // Posts made in the kiddy zone are marked kid, and only show there.
 if (!db.prepare("PRAGMA table_info(posts)").all().some(c => c.name === "kid")) db.exec("ALTER TABLE posts ADD COLUMN kid INTEGER NOT NULL DEFAULT 0");
+// A video post can have a thumbnail: a picture shown on it before it plays (see /api/posts/:id/thumbnail).
+if (!db.prepare("PRAGMA table_info(posts)").all().some(c => c.name === "thumb_path")) db.exec("ALTER TABLE posts ADD COLUMN thumb_path TEXT");
+// Reporting a post for "Something else" needs the reporter to say what's wrong, in their own words, for the admins.
+if (!db.prepare("PRAGMA table_info(post_reports)").all().some(c => c.name === "details")) db.exec("ALTER TABLE post_reports ADD COLUMN details TEXT");
 // Like YouTube, a post has a description under its caption, and who can see it: "public" (everyone, on the feed and the
 // person's profile), "unlisted" (only the person's friends on Yakimma) or "private" (only the person who posted it).
 // The person can change it any time.
@@ -498,7 +569,8 @@ const upload = multer({
       cb(null, `${crypto.randomUUID()}${ext}`);
     }
   }),
-  limits: { fileSize: 100 * 1024 * 1024, files: 1 },
+  // The post's photo or video, and a thumbnail picture for a video.
+  limits: { fileSize: 100 * 1024 * 1024, files: 2 },
   fileFilter: (_req, file, cb) => {
     const allowed = /^(image\/(jpeg|png|gif|webp)|video\/(mp4|webm|quicktime))$/i;
     cb(allowed.test(file.mimetype) ? null : new Error("Choose a JPG, PNG, GIF, WebP, MP4, WebM, or MOV file."), allowed.test(file.mimetype));
@@ -510,6 +582,15 @@ const avatarUpload = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => cb(null, uploadDir),
     filename: (_req, file, cb) => cb(null, `avatar-${crypto.randomUUID()}${AVATAR_TYPES[file.mimetype]}`)
+  }),
+  limits: { fileSize: 5 * 1024 * 1024, files: 1 },
+  fileFilter: (_req, file, cb) => cb(AVATAR_TYPES[file.mimetype] ? null : new Error("Choose a JPG, PNG, GIF, or WebP picture."), Boolean(AVATAR_TYPES[file.mimetype]))
+});
+// A new thumbnail for a video post that's already up.
+const thumbUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, uploadDir),
+    filename: (_req, file, cb) => cb(null, `thumb-${crypto.randomUUID()}${AVATAR_TYPES[file.mimetype]}`)
   }),
   limits: { fileSize: 5 * 1024 * 1024, files: 1 },
   fileFilter: (_req, file, cb) => cb(AVATAR_TYPES[file.mimetype] ? null : new Error("Choose a JPG, PNG, GIF, or WebP picture."), Boolean(AVATAR_TYPES[file.mimetype]))
@@ -542,16 +623,37 @@ function setAvatarPhoto(userId, filename) {
 function currentUser(req) {
   if (!req.session.userId) return null;
   // Only whether the kiddy zone birth dates are filled in. The dates themselves are never sent anywhere.
-  return db.prepare(`SELECT id, username, mc, lc, hand_tone, avatar_emoji, avatar_bg, avatar_path, theme, zone_theme, adult_verified_at, adult_on, kid_pass_hash, kid_face, kid_on, song, religion, country,
+  return db.prepare(`SELECT id, username, mc, lc, hand_tone, avatar_emoji, avatar_bg, avatar_path, theme, zone_theme, adult_verified_at, adult_on, kid_pass_hash, kid_face, kid_on, song, religion, country, suspended_until, suspend_reason,
     (kid_birth_date IS NOT NULL AND parent_birth_date IS NOT NULL) AS kid_birth_dates FROM users WHERE id = ?`).get(req.session.userId) || null;
 }
+// A suspended account can't do anything until its suspension is over (it can still sign out and read the rules).
 function requireAuth(req, res, next) {
-  if (!currentUser(req)) return res.status(401).json({ error: "Please sign in first." });
+  const u = currentUser(req);
+  if (!u) return res.status(401).json({ error: "Please sign in first." });
+  const suspended = suspensionOf(u);
+  if (suspended) return res.status(403).json({ error: suspendedMessage(suspended), suspended });
   next();
 }
+// ---- ⛔ Suspensions: only the creator gives them, for any number of days, with a reason the person sees. ----
+// The creator can never be suspended, whatever is saved.
+const suspensionOf = row => !isCreator(row?.username) && row?.suspended_until > Date.now() ? { until: row.suspended_until, reason: row.suspend_reason || "" } : null;
+const suspendedMessage = s => {
+  const days = Math.ceil((s.until - Date.now()) / (24 * 60 * 60 * 1000));
+  return `Your account is suspended for ${days} more day${days === 1 ? "" : "s"}.${s.reason ? ` Reason: ${s.reason}` : ""}`;
+};
+const MAX_SUSPENSION_DAYS = 3650;
+function requireCreator(req, res, next) {
+  if (!isCreator(currentUser(req)?.username)) return res.status(403).json({ error: "Only the creator can do that." });
+  next();
+}
+// Some accounts have a picture that's always theirs and can't be changed, not even to 🛠️. Write names in small letters.
+const FIXED_AVATARS = { creator: "/badges/pastel-yakimma-cat.jpg" };
+const fixedAvatarOf = username => FIXED_AVATARS[username?.toLowerCase()] || null;
 // Admins' profile picture is always 🛠️, which proves they're admins. Nobody else can pick it (it isn't in avatarOptions).
 const ADMIN_EMOJI = "🛠️";
 function avatarOf(row) {
+  const fixed = fixedAvatarOf(row.username);
+  if (fixed) return { emoji: row.avatar_emoji, bg: row.avatar_bg, photoUrl: fixed, fixed: true };
   if (ADMINS.includes(row.username?.toLowerCase())) return { emoji: ADMIN_EMOJI, bg: row.avatar_bg, photoUrl: null };
   return { emoji: row.avatar_emoji, bg: row.avatar_bg, photoUrl: row.avatar_path ? `/uploads/${encodeURIComponent(row.avatar_path)}` : null };
 }
@@ -562,13 +664,23 @@ const accountNumber = id => String(id - 1).padStart(13, "0");
 // Yakimma's admins: they can delete anyone's posts, groups and group chat messages, and they see the Reports page.
 // So they can check how things look, they can also switch into the 18+ zone or the kiddy zone (and out again) without
 // the checks, the parent password or the parent's face. Write names in small letters.
-const ADMINS = ["bleh", "manhatukfayay"];
+const ADMINS = ["bleh", "creator"];
+// Admins (the creator too) can have a display name as well as their username. It shows first, with @username after it.
+const canHaveDisplayName = username => ADMINS.includes(username?.toLowerCase());
+const displayNames = () => Object.fromEntries(db.prepare("SELECT username, display_name FROM users WHERE display_name IS NOT NULL").all()
+  .filter(r => canHaveDisplayName(r.username)).map(r => [r.username.toLowerCase(), r.display_name]));
+// "Creator" belongs to the creator: nobody else can have that word anywhere in their username or display name. Their old
+// username, Manhatukfayay, is kept for them too, so nobody can pretend to be them.
+const isCreator = username => username?.toLowerCase() === "creator";
+const creatorOnlyName = name => /creator|manhatukfayay/i.test(name.replace(/\s/g, ""));
+const CREATOR_ONLY = "Only the creator can have that name.";
 const isAdmin = userId => ADMINS.includes(db.prepare("SELECT username FROM users WHERE id=?").get(userId || 0)?.username.toLowerCase());
 function publicUser(row) {
-  return row ? { id: row.id, accountNumber: accountNumber(row.id), username: row.username, mc: row.mc, lc: row.lc, handTone: row.hand_tone, avatar: avatarOf(row), theme: row.adult_on ? row.zone_theme : row.theme, song: row.song, admin: ADMINS.includes(row.username.toLowerCase()),
+  return row ? { id: row.id, accountNumber: accountNumber(row.id), username: row.username, mc: row.mc, lc: row.lc, handTone: row.hand_tone, avatar: avatarOf(row), theme: row.adult_on ? row.zone_theme : row.theme, song: row.song, admin: ADMINS.includes(row.username.toLowerCase()), creator: isCreator(row.username), suspended: suspensionOf(row),
     religion: row.religion, country: row.country,
     adult: { verified: Boolean(row.adult_verified_at), on: Boolean(row.adult_on) },
-    kid: { ready: Boolean(row.kid_pass_hash), face: Boolean(row.kid_face), on: Boolean(row.kid_on), birthDates: Boolean(row.kid_birth_dates) } } : null;
+    kid: { ready: Boolean(row.kid_pass_hash), face: Boolean(row.kid_face), on: Boolean(row.kid_on), birthDates: Boolean(row.kid_birth_dates) },
+    ...assistantInfo(row.id, row.id) } : null;
 }
 function ownsItem(userId, itemId) {
   return Boolean(db.prepare("SELECT 1 FROM inventory WHERE user_id=? AND item_id=?").get(userId, itemId));
@@ -644,9 +756,13 @@ function friendsPayload(userId) {
     outgoing: pending.filter(r => r.requesterId === userId).map(request),
     blocked: db.prepare(`SELECT u.id, u.username, u.avatar_emoji, u.avatar_bg, u.avatar_path FROM blocks b JOIN users u ON u.id=b.blocked_id
       WHERE b.blocker_id=? ORDER BY u.username COLLATE NOCASE`).all(userId).map(r => ({ id: r.id, username: r.username, avatar: avatarOf(r) })),
-    follows: followCounts(userId)
+    follows: followCounts(userId),
+    nicknames: nicknamesOf(userId)
   };
 }
+// The nicknames someone gave their friends, by username in small letters.
+const nicknamesOf = userId => Object.fromEntries(db.prepare(`SELECT u.id, u.username, n.nickname FROM nicknames n JOIN users u ON u.id=n.friend_id
+  WHERE n.owner_id=?`).all(userId).filter(r => areFriends(userId, r.id)).map(r => [r.username.toLowerCase(), r.nickname]));
 const followCounts = userId => ({
   followers: db.prepare("SELECT COUNT(*) AS n FROM follows WHERE followee_id=?").get(userId).n,
   following: db.prepare("SELECT COUNT(*) AS n FROM follows WHERE follower_id=?").get(userId).n
@@ -731,6 +847,66 @@ const inventoryOf = userId => db.prepare("SELECT item_id FROM inventory WHERE us
 const cleanText = s => String(s || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
 const MAX_MESSAGE = 500;
 const MAX_REACTIONS = 20;
+
+// ---- 🔔 Notifications and @tags ----
+// Tells someone what another person did, for their 🔔 bell. Nothing goes to yourself, between people where one blocked
+// the other, or twice for the same thing (like liking a post, unliking it and liking it again).
+function notify(userId, actorId, kind, { postId = null, commentId = null, messageId = null, emoji = null } = {}) {
+  if (!userId || !actorId || userId === actorId || !canSee(userId, actorId)) return;
+  const same = db.prepare(`SELECT 1 FROM notifications WHERE user_id=? AND actor_id=? AND kind=? AND post_id IS ? AND comment_id IS ? AND message_id IS ? AND emoji IS ?`)
+    .get(userId, actorId, kind, postId, commentId, messageId, emoji);
+  if (!same) db.prepare("INSERT INTO notifications(user_id,actor_id,kind,post_id,comment_id,message_id,emoji) VALUES(?,?,?,?,?,?,?)")
+    .run(userId, actorId, kind, postId, commentId, messageId, emoji);
+}
+// Writing @username in a post, a comment or a chat message tags that person. The same pattern is in app.js.
+const MENTION = /(^|[^A-Za-z0-9@])@([A-Za-z0-9]{3,20})(?![A-Za-z0-9])/g;
+const MAX_TAGS = 20;
+function taggedIds(...texts) {
+  const names = [...new Set([...texts.join(" ").matchAll(MENTION)].map(m => m[2].toLowerCase()))].slice(0, MAX_TAGS);
+  return names.map(name => db.prepare("SELECT id FROM users WHERE username=?").get(name)?.id).filter(Boolean);
+}
+// Tags in a post or one of its comments only reach people who can see that post.
+function notifyPostTags(actorId, postId, texts, commentId = null, except = []) {
+  const post = playlistPost(postId);
+  for (const id of taggedIds(...texts)) if (post && !except.includes(id) && canOpenPost(id, post)) notify(id, actorId, "tag", { postId, commentId });
+}
+// Tags in a friend chat only reach the friend. Tags in a group chat reach anyone who could use that group from their zone,
+// even if they're not in it: they can then see the messages they were tagged in there, and nothing else (see /tagged).
+function notifyChatTags(actorId, chat, messageId, body) {
+  const group = chat.groupKey && findGroup(chat.groupKey);
+  for (const id of taggedIds(body)) {
+    const reaches = group ? !groupZoneError(id, group) : id === chat.friendId;
+    if (reaches) notify(id, actorId, "tag", { messageId });
+  }
+}
+// A group's name and icon, and whether someone is in it, for their notifications.
+function groupBrief(key, userId) {
+  const group = findGroup(key), row = group && (group.secret || db.prepare("SELECT name, icon FROM community_groups WHERE id=?").get(group.id));
+  return row ? { key: group.key, name: row.name, icon: row.icon, member: isGroupMember(userId, group), secret: Boolean(group.secret) } : null;
+}
+const NOTIFICATIONS_SHOWN = 50;
+// Someone's newest notifications, leaving out people they can't see (because of a block) and deleted messages.
+function notificationsPayload(userId) {
+  const rows = db.prepare(`SELECT n.id, n.kind, n.emoji, n.created_at AS createdAt, n.read_at AS readAt, n.comment_id AS commentId,
+      n.actor_id AS actorId, u.username, u.avatar_emoji, u.avatar_bg, u.avatar_path,
+      p.id AS postId, p.code AS postCode, p.group_key AS postGroup, c.body AS commentBody,
+      m.id AS messageId, m.group_key AS messageGroup, m.deleted_at AS messageDeleted
+    FROM notifications n JOIN users u ON u.id=n.actor_id
+      LEFT JOIN posts p ON p.id=n.post_id LEFT JOIN comments c ON c.id=n.comment_id LEFT JOIN messages m ON m.id=n.message_id
+    WHERE n.user_id=? ORDER BY n.id DESC LIMIT ?`).all(userId, NOTIFICATIONS_SHOWN * 2);
+  const notifications = rows.filter(n => canSee(userId, n.actorId) && !n.messageDeleted).slice(0, NOTIFICATIONS_SHOWN).map(n => ({
+    id: n.id, kind: n.kind, emoji: n.emoji, createdAt: n.createdAt, read: Boolean(n.readAt),
+    actor: { id: n.actorId, username: n.username, avatar: avatarOf(n) },
+    post: n.postId ? { id: n.postId, code: n.postCode, groupKey: n.postGroup } : null,
+    comment: n.commentId ? { id: n.commentId, preview: n.commentBody.slice(0, 80) } : null,
+    // A message is in a group's chat (which you might not be in), or in your chat with the person who did it.
+    message: n.messageId ? { id: n.messageId, group: n.messageGroup ? groupBrief(n.messageGroup, userId) : null, friendId: n.messageGroup ? null : n.actorId } : null
+  }));
+  return { notifications, unread: unreadNotifications(userId) };
+}
+const unreadNotifications = userId => db.prepare(`SELECT COUNT(*) AS n FROM notifications n LEFT JOIN messages m ON m.id=n.message_id
+  WHERE n.user_id=? AND n.read_at IS NULL AND m.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM blocks b
+    WHERE (b.blocker_id=n.user_id AND b.blocked_id=n.actor_id) OR (b.blocker_id=n.actor_id AND b.blocked_id=n.user_id))`).get(userId).n;
 // The friend in the URL. Only friends can chat with each other.
 function chatFriend(req, res) {
   const friendId = Number(req.params.userId);
@@ -759,15 +935,7 @@ function chatMessages(viewerId, chat, since = 0) {
       WHERE ${chat.where} AND m.rev>? AND NOT EXISTS(SELECT 1 FROM blocks b WHERE b.blocker_id=? AND b.blocked_id=m.sender_id)
       ORDER BY m.id DESC LIMIT 100
     ) ORDER BY id`).all(...chat.params, since, viewerId);
-  const reactions = {};
-  if (rows.length) for (const r of db.prepare(`SELECT r.message_id AS id, r.emoji, r.user_id AS userId, u.username
-      FROM message_reactions r JOIN users u ON u.id=r.user_id
-      WHERE r.message_id IN (${rows.map(() => "?").join(",")}) ORDER BY r.created_at, r.rowid`).all(...rows.map(m => m.id))) {
-    const list = (reactions[r.id] ||= []);
-    let e = list.find(x => x.emoji === r.emoji);
-    if (!e) list.push(e = { emoji: r.emoji, count: 0, mine: false, users: [] });
-    e.count++; e.mine ||= r.userId === viewerId; e.users.push(r.username);
-  }
+  const reactions = reactionsOn("message_reactions", "message_id", rows, viewerId);
   return {
     messages: rows.map(m => ({
       id: m.id, rev: m.rev, userId: m.userId, username: m.username, avatar: avatarOf(m), body: m.body, forwarded: Boolean(m.forwarded),
@@ -776,6 +944,19 @@ function chatMessages(viewerId, chat, since = 0) {
     rev: db.prepare(`SELECT COALESCE(MAX(m.rev), 0) AS rev FROM messages m WHERE ${chat.where}`).get(...chat.params).rev
   };
 }
+// The reactions on some messages or comments (`rows`), by id: each emoji with how many, whether the viewer picked it, and who did.
+function reactionsOn(table, column, rows, viewerId) {
+  const reactions = {};
+  if (rows.length) for (const r of db.prepare(`SELECT r.${column} AS id, r.emoji, r.user_id AS userId, u.username
+      FROM ${table} r JOIN users u ON u.id=r.user_id
+      WHERE r.${column} IN (${rows.map(() => "?").join(",")}) ORDER BY r.created_at, r.rowid`).all(...rows.map(m => m.id))) {
+    const list = (reactions[r.id] ||= []);
+    let e = list.find(x => x.emoji === r.emoji);
+    if (!e) list.push(e = { emoji: r.emoji, count: 0, mine: false, users: [] });
+    e.count++; e.mine ||= r.userId === viewerId; e.users.push(r.username);
+  }
+  return reactions;
+}
 const insertMessage = (chat, senderId, body, forwarded = 0) => db.prepare("INSERT INTO messages(group_key,sender_id,recipient_id,body,forwarded,rev) VALUES(?,?,?,?,?,?)")
   .run(chat.groupKey ?? null, senderId, chat.friendId ?? null, body, forwarded, nextRev());
 const markRead = (me, chat) => { if (chat.friendId) db.prepare("UPDATE messages SET read_at=CURRENT_TIMESTAMP WHERE sender_id=? AND recipient_id=? AND read_at IS NULL").run(chat.friendId, me); };
@@ -783,17 +964,18 @@ const markRead = (me, chat) => { if (chat.friendId) db.prepare("UPDATE messages 
 function selectPosts(viewerId, where, params, order = "DESC", limit = 100) {
   return db.prepare(`
     SELECT p.id, p.code, p.user_id AS userId, u.username, p.caption, p.description, p.visibility, p.group_key AS groupKey, p.media_path AS mediaPath,
-      p.media_type AS mediaType, p.created_at AS createdAt, u.avatar_emoji, u.avatar_bg, u.avatar_path,
+      p.thumb_path AS thumbPath, p.media_type AS mediaType, p.created_at AS createdAt, u.avatar_emoji, u.avatar_bg, u.avatar_path,
       (SELECT COUNT(*) FROM likes l WHERE l.post_id=p.id) AS likes,
       EXISTS(SELECT 1 FROM likes l WHERE l.post_id=p.id AND l.user_id=?) AS liked,
-      EXISTS(SELECT 1 FROM playlist s WHERE s.post_id=p.id AND s.user_id=?) AS inPlaylist
+      EXISTS(SELECT 1 FROM playlist s WHERE s.post_id=p.id AND s.user_id=?) AS inPlaylist,
+      (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id AND NOT EXISTS(SELECT 1 FROM blocks b WHERE b.blocker_id=? AND b.blocked_id=c.user_id)) AS comments
     FROM posts p JOIN users u ON u.id=p.user_id
     WHERE ${where}
     ORDER BY p.id ${order} LIMIT ?
-  `).all(viewerId || 0, viewerId || 0, ...params, limit).map(p => ({
+  `).all(viewerId || 0, viewerId || 0, viewerId || 0, ...params, limit).map(p => ({
     id: p.id, code: p.code, userId: p.userId, username: p.username, avatar: avatarOf(p), caption: p.caption, description: p.description, visibility: p.visibility, inGroup: Boolean(p.groupKey),
-    mediaUrl: p.mediaPath ? `/uploads/${encodeURIComponent(p.mediaPath)}` : null,
-    mediaType: p.mediaType, createdAt: p.createdAt, likes: p.likes, liked: Boolean(p.liked), inPlaylist: Boolean(p.inPlaylist)
+    mediaUrl: p.mediaPath ? `/uploads/${encodeURIComponent(p.mediaPath)}` : null, thumbUrl: p.thumbPath ? `/uploads/${encodeURIComponent(p.thumbPath)}` : null,
+    mediaType: p.mediaType, createdAt: p.createdAt, likes: p.likes, liked: Boolean(p.liked), inPlaylist: Boolean(p.inPlaylist), comments: p.comments
   }));
 }
 // The newest 100 posts on the main feed (or in a group) the viewer may see (public, or unlisted by them or a friend),
@@ -812,8 +994,8 @@ function apiError(err, _req, res, _next) {
 
 app.get("/api/me", (req, res) => {
   const u = currentUser(req);
-  if (!u) return res.json({ user: null, products, themes, nailOptions, avatarOptions, reportReasons: REPORT_REASONS, religions: RELIGIONS, countries: COUNTRIES });
-  res.json({ user: publicUser(u), inventory: inventoryOf(u.id), products, themes, nailOptions, avatarOptions, reportReasons: REPORT_REASONS, religions: RELIGIONS, countries: COUNTRIES, learn: learnPayload(u.id), usernameCost: USERNAME_COST, songs: songsPayload(u.id) });
+  if (!u) return res.json({ user: null, products, themes, nailOptions, avatarOptions, reportReasons: REPORT_REASONS, religions: RELIGIONS, countries: COUNTRIES, displayNames: displayNames() });
+  res.json({ user: publicUser(u), displayNames: displayNames(), notifications: unreadNotifications(u.id), inventory: inventoryOf(u.id), products, themes, nailOptions, avatarOptions, reportReasons: REPORT_REASONS, religions: RELIGIONS, countries: COUNTRIES, learn: learnPayload(u.id), usernameCost: USERNAME_COST, songs: songsPayload(u.id) });
 });
 
 // ---- Religion and country ----
@@ -864,7 +1046,9 @@ app.post("/api/signup", authLimiter, async (req, res, next) => {
   try {
     const username = String(req.body.username || "").trim();
     const password = String(req.body.password || "");
-    if (usernameProblem(username)) return res.status(400).json({ error: usernameProblem(username) });    // Passwords can have any letters, numbers, symbols or emojis, but no spaces.
+    if (usernameProblem(username)) return res.status(400).json({ error: usernameProblem(username) });
+    if (creatorOnlyName(username)) return res.status(403).json({ error: CREATOR_ONLY });
+    // Passwords can have any letters, numbers, symbols or emojis, but no spaces.
     if (/\s/.test(password)) return res.status(400).json({ error: "Do not use spaces in your password." });
     if (password.length < 8 || password.length > 200) return res.status(400).json({ error: "Password must be 8–200 characters." });
     const { religion, country } = req.body;
@@ -931,6 +1115,7 @@ app.put("/api/me/username", requireAuth, (req, res) => {
   const me = currentUser(req), username = String(req.body.username || "").trim(), whole = req.body.whole === true;
   if (usernameProblem(username)) return res.status(400).json({ error: usernameProblem(username) });
   if (username === me.username) return res.status(400).json({ error: "That's already your username." });
+  if (creatorOnlyName(username) && !isCreator(me.username)) return res.status(403).json({ error: CREATOR_ONLY });
   const sameLetters = username.toLowerCase() === me.username.toLowerCase();
   if (!whole && !sameLetters) return res.status(400).json({ error: "Here you can only change which letters are capitals. For new letters, use Change Whole Username." });
   if (whole && sameLetters) return res.status(400).json({ error: "That only changes capital letters, which is free. Use Change Capitalization instead." });
@@ -950,12 +1135,24 @@ app.put("/api/me/username", requireAuth, (req, res) => {
   res.json({ user: publicUser(currentUser(req)) });
 });
 
+// Admins set their display name on their Profile. Leaving it empty takes it away.
+app.put("/api/me/display-name", requireAuth, (req, res) => {
+  const me = currentUser(req), name = String(req.body.displayName ?? "").trim().replace(/\s+/g, " ");
+  if (!canHaveDisplayName(me.username)) return res.status(403).json({ error: "Only admins can have a display name." });
+  if ([...name].length > 30) return res.status(400).json({ error: "Display names can be up to 30 characters." });
+  if (/\p{Cc}/u.test(name)) return res.status(400).json({ error: "That display name has a character that can't be used." });
+  if (name && creatorOnlyName(name) && !isCreator(me.username)) return res.status(403).json({ error: CREATOR_ONLY });
+  db.prepare("UPDATE users SET display_name=? WHERE id=?").run(name || null, me.id);
+  res.json({ user: publicUser(currentUser(req)), displayNames: displayNames() });
+});
+
 app.post("/api/login", authLimiter, async (req, res, next) => {
   try {
     const username = String(req.body.username || "").trim();
     const password = String(req.body.password || "");
     const row = db.prepare("SELECT * FROM users WHERE username = ? COLLATE NOCASE").get(username);
     if (!row || !(await bcrypt.compare(password, row.password_hash))) return res.status(401).json({ error: "Username or password is incorrect." });
+    if (suspensionOf(row)) return res.status(403).json({ error: suspendedMessage(suspensionOf(row)) });
     req.session.regenerate(err => {
       if (err) return next(err);
       req.session.userId = row.id;
@@ -1000,20 +1197,26 @@ app.get("/api/me/posts", requireAuth, (req, res) => {
 
 // Makes a post on the main feed, or inside a group when groupKey is given.
 function createPost(req, res, next, groupKey) {
-  upload.single("media")(req, res, err => {
+  upload.fields([{ name: "media", maxCount: 1 }, { name: "thumb", maxCount: 1 }])(req, res, err => {
     if (err) return apiError(err, req, res, next);
+    req.file = req.files?.media?.[0];
+    // A thumbnail is only kept for a video, and only if it's a real picture.
+    const thumbFile = req.files?.thumb?.[0];
+    const thumb = thumbFile && req.file?.mimetype.startsWith("video/") && thumbFile.mimetype.startsWith("image/") && isImageFile(thumbFile.path) ? thumbFile : null;
+    if (thumbFile && !thumb) fs.unlink(thumbFile.path, () => {});
     try {
       const caption = String(req.body.caption || "").trim().slice(0, 240), description = String(req.body.description || "").trim().slice(0, MAX_DESCRIPTION);
       // Group posts are always public to the group.
       const visibility = !groupKey && VISIBILITIES.includes(req.body.visibility) ? req.body.visibility : "public";
       if (!caption) {
-        if (req.file) fs.unlink(req.file.path, () => {});
+        for (const f of [req.file, thumb]) if (f) fs.unlink(f.path, () => {});
         return res.status(400).json({ error: "Add a caption before posting." });
       }
       const type = req.file ? req.file.mimetype : null;
       const code = newPostCode();
-      const result = db.prepare("INSERT INTO posts(user_id,code,caption,description,visibility,media_path,media_type,group_key,adult,kid) VALUES(?,?,?,?,?,?,?,?,?,?)")
-        .run(req.session.userId, code, caption, description, visibility, req.file ? path.basename(req.file.filename) : null, type, groupKey, ...postZone(req.session.userId));
+      const result = db.prepare("INSERT INTO posts(user_id,code,caption,description,visibility,media_path,media_type,thumb_path,group_key,adult,kid) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+        .run(req.session.userId, code, caption, description, visibility, req.file ? path.basename(req.file.filename) : null, type, thumb ? path.basename(thumb.filename) : null, groupKey, ...postZone(req.session.userId));
+      notifyPostTags(req.session.userId, Number(result.lastInsertRowid), [caption, description]);
       res.status(201).json({ postId: Number(result.lastInsertRowid), code, posts: postRows(req.session.userId, groupKey) });
     } catch (e) { next(e); }
   });
@@ -1040,26 +1243,59 @@ app.put("/api/posts/:id/visibility", requireAuth, (req, res) => {
   res.json({ ok: true, visibility });
 });
 
+// The person who posted a video can give it a thumbnail, or a new one, any time.
+app.put("/api/posts/:id/thumbnail", requireAuth, (req, res, next) => {
+  const post = db.prepare("SELECT id, user_id, media_type, thumb_path FROM posts WHERE id=?").get(Number(req.params.id));
+  if (!post || post.user_id !== req.session.userId) return res.status(404).json({ error: "You can only change your own posts." });
+  if (!post.media_type?.startsWith("video/")) return res.status(400).json({ error: "Only videos have thumbnails." });
+  thumbUpload.single("thumb")(req, res, err => {
+    if (err) return res.status(400).json({ error: err.code === "LIMIT_FILE_SIZE" ? "Thumbnails must be 5 MB or smaller." : err.message || "Upload could not be completed." });
+    if (!req.file) return res.status(400).json({ error: "Choose a picture first." });
+    try {
+      if (!isImageFile(req.file.path)) { fs.unlink(req.file.path, () => {}); return res.status(400).json({ error: "That file isn't a picture we can use." }); }
+      db.prepare("UPDATE posts SET thumb_path=? WHERE id=?").run(req.file.filename, post.id);
+      if (post.thumb_path) fs.unlink(path.join(uploadDir, path.basename(post.thumb_path)), () => {});
+      res.json({ thumbUrl: `/uploads/${encodeURIComponent(req.file.filename)}` });
+    } catch (e) { next(e); }
+  });
+});
+
 // You can delete your own posts (videos, photos and text). Admins can delete anyone's.
 app.delete("/api/posts/:id", requireAuth, (req, res) => {
-  const me = req.session.userId, post = db.prepare("SELECT id, user_id, media_path FROM posts WHERE id=?").get(Number(req.params.id));
+  const me = req.session.userId, post = db.prepare("SELECT id, user_id, media_path, thumb_path FROM posts WHERE id=?").get(Number(req.params.id));
   if (!post) return res.status(404).json({ error: "That post is already gone." });
   if (post.user_id !== me && !isAdmin(me)) return res.status(403).json({ error: "You can only delete your own posts." });
   db.prepare("DELETE FROM posts WHERE id=?").run(post.id);
-  if (post.media_path) fs.unlink(path.join(uploadDir, path.basename(post.media_path)), () => {});
+  for (const file of [post.media_path, post.thumb_path]) if (file) fs.unlink(path.join(uploadDir, path.basename(file)), () => {});
   res.json({ ok: true });
 });
 
 // Reporting someone else's post. Each person can report a post once (reporting again changes the reason).
 const REPORT_REASONS = ["😠 Mean or bullying", "🧸 Not OK for kids", "📢 Spam", "❓ Something else"];
+const SOMETHING_ELSE = REPORT_REASONS.at(-1), MAX_REPORT_DETAILS = 500;
 const reportLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false, message: { error: "You're reporting a lot. Please wait a little while." } });
 app.post("/api/posts/:id/report", requireAuth, reportLimiter, (req, res) => {
   const me = req.session.userId, post = db.prepare("SELECT id, user_id AS userId, user_id, adult, kid, visibility FROM posts WHERE id=?").get(Number(req.params.id)), [adult, kid] = postZone(me);
   if (!post || post.adult !== adult || post.kid !== kid || !seesPost(me, post)) return res.status(404).json({ error: "Post not found." });
   if (post.user_id === me) return res.status(400).json({ error: "You can't report your own post. You can delete it instead." });
   if (!REPORT_REASONS.includes(req.body.reason)) return res.status(400).json({ error: "Choose why you're reporting it." });
-  db.prepare(`INSERT INTO post_reports(post_id,reporter_id,reason) VALUES(?,?,?)
-    ON CONFLICT(post_id,reporter_id) DO UPDATE SET reason=excluded.reason, created_at=CURRENT_TIMESTAMP`).run(post.id, me, req.body.reason);
+  // "Something else" has to say what's wrong, in the reporter's own words. The other reasons don't take any words.
+  const details = req.body.reason === SOMETHING_ELSE ? cleanText(req.body.details).slice(0, MAX_REPORT_DETAILS) : null;
+  if (req.body.reason === SOMETHING_ELSE && details.length < 3) return res.status(400).json({ error: "Write what's wrong in your own words, so the admins know." });
+  db.prepare(`INSERT INTO post_reports(post_id,reporter_id,reason,details) VALUES(?,?,?,?)
+    ON CONFLICT(post_id,reporter_id) DO UPDATE SET reason=excluded.reason, details=excluded.details, created_at=CURRENT_TIMESTAMP`).run(post.id, me, req.body.reason, details);
+  res.json({ ok: true });
+});
+// Reporting someone else's comment works the same way.
+app.post("/api/comments/:id/report", requireAuth, reportLimiter, (req, res) => {
+  const me = req.session.userId, found = seenComment(req, res);
+  if (!found) return;
+  if (found.comment.userId === me) return res.status(400).json({ error: "You can't report your own comment. You can delete it instead." });
+  if (!REPORT_REASONS.includes(req.body.reason)) return res.status(400).json({ error: "Choose why you're reporting it." });
+  const details = req.body.reason === SOMETHING_ELSE ? cleanText(req.body.details).slice(0, MAX_REPORT_DETAILS) : null;
+  if (req.body.reason === SOMETHING_ELSE && details.length < 3) return res.status(400).json({ error: "Write what's wrong in your own words, so the admins know." });
+  db.prepare(`INSERT INTO comment_reports(comment_id,reporter_id,reason,details) VALUES(?,?,?,?)
+    ON CONFLICT(comment_id,reporter_id) DO UPDATE SET reason=excluded.reason, details=excluded.details, created_at=CURRENT_TIMESTAMP`).run(found.comment.id, me, req.body.reason, details);
   res.json({ ok: true });
 });
 // The Reports page, for admins (it isn't in the kiddy zone): reported 18+ posts in the 18+ zone, and reported posts from
@@ -1070,14 +1306,32 @@ function requireAdmin(req, res, next) {
 }
 function reportsPayload(userId) {
   const reports = {};
-  for (const r of db.prepare(`SELECT r.post_id AS postId, r.reason, r.created_at AS createdAt, u.username, p.kid FROM post_reports r
+  for (const r of db.prepare(`SELECT r.post_id AS postId, r.reason, r.details, r.created_at AS createdAt, u.id AS reporterId, u.username, p.kid FROM post_reports r
     JOIN users u ON u.id=r.reporter_id JOIN posts p ON p.id=r.post_id ORDER BY r.created_at DESC`).all()) (reports[r.postId] ||= []).push(r);
   const posts = selectPosts(userId, "p.id IN (SELECT post_id FROM post_reports) AND p.adult=?", [inZone(userId) ? 1 : 0], "DESC", 200)
     .map(p => ({ ...p, kid: Boolean(reports[p.id][0].kid), reports: reports[p.id].map(({ kid, ...r }) => r) }))
     .sort((a, b) => b.reports[0].createdAt.localeCompare(a.reports[0].createdAt));
-  return { posts };
+  // Reported comments, with the post they're on, newest report first.
+  const byComment = {};
+  for (const r of db.prepare(`SELECT r.comment_id AS commentId, r.reason, r.details, r.created_at AS createdAt, u.id AS reporterId, u.username
+    FROM comment_reports r JOIN users u ON u.id=r.reporter_id JOIN comments c ON c.id=r.comment_id JOIN posts p ON p.id=c.post_id
+    WHERE p.adult=? ORDER BY r.created_at DESC`).all(inZone(userId) ? 1 : 0)) (byComment[r.commentId] ||= []).push(r);
+  const comments = Object.keys(byComment).map(Number).map(id => {
+    const c = db.prepare(`SELECT c.id, c.body, c.created_at AS createdAt, c.user_id AS userId, u.username, u.avatar_emoji, u.avatar_bg, u.avatar_path,
+      p.id AS postId, p.code AS postCode, p.caption AS postCaption, p.group_key AS postGroup, p.user_id AS postUserId, p.kid
+      FROM comments c JOIN users u ON u.id=c.user_id JOIN posts p ON p.id=c.post_id WHERE c.id=?`).get(id);
+    return { id: c.id, body: c.body, createdAt: c.createdAt, userId: c.userId, username: c.username, avatar: avatarOf(c), kid: Boolean(c.kid),
+      post: { id: c.postId, code: c.postCode, caption: c.postCaption, groupKey: c.postGroup },
+      canDelete: canDeleteComment(userId, { userId: c.userId }, { userId: c.postUserId }), reports: byComment[id] };
+  });
+  return { posts, comments };
 }
 app.get("/api/reports", requireAuth, requireAdmin, (req, res) => res.json(reportsPayload(req.session.userId)));
+// Keeping a reported comment: its reports are cleared.
+app.delete("/api/reports/comments/:commentId", requireAuth, requireAdmin, (req, res) => {
+  db.prepare("DELETE FROM comment_reports WHERE comment_id=?").run(Number(req.params.commentId));
+  res.json(reportsPayload(req.session.userId));
+});
 // Keeping a reported post: its reports are cleared.
 app.delete("/api/reports/:postId", requireAuth, requireAdmin, (req, res) => {
   db.prepare("DELETE FROM post_reports WHERE post_id=?").run(Number(req.params.postId));
@@ -1098,6 +1352,7 @@ const likeTransaction = db.transaction((userId, postId) => {
     return { liked: false, groupKey: post.groupKey };
   }
   db.prepare("INSERT INTO likes(user_id,post_id) VALUES(?,?)").run(userId, postId);
+  notify(post.user_id, userId, "like", { postId });
   const reward = db.prepare("INSERT OR IGNORE INTO like_rewards(liker_id,post_id) VALUES(?,?)").run(userId, postId);
   if (reward.changes) db.prepare("UPDATE users SET mc=mc+10 WHERE id=?").run(post.user_id);
   return { liked: true, rewarded: Boolean(reward.changes), groupKey: post.groupKey };
@@ -1108,6 +1363,88 @@ app.post("/api/posts/:id/like", requireAuth, (req, res) => {
   const result = likeTransaction(req.session.userId, postId);
   if (result.error) return res.status(result.status).json({ error: result.error });
   res.json({ ...result, posts: postRows(req.session.userId, result.groupKey), user: publicUser(currentUser(req)) });
+});
+
+// ---- Comments 💬 ----
+// Anyone who can see a post can read its comments and write one (guests can only read), or reply to one. Replies are one
+// level deep: a reply to a reply goes under the same comment. A comment can be deleted by the person who wrote it, the
+// person whose post it is, or the creator, and its replies go with it. People can react to comments with emojis.
+const MAX_COMMENT = 500, COMMENTS_SHOWN = 500;
+const commentLimiter = rateLimit({ windowMs: 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false, message: { error: "You're commenting very fast. Take a little break and try again." } });
+// The post in the URL, if the viewer can see it. Otherwise this answers with an error and returns null.
+function seenPost(req, res) {
+  const id = Number(req.params.id), post = Number.isSafeInteger(id) && playlistPost(id);
+  if (!post || !canOpenPost(req.session.userId || 0, post)) { res.status(404).json({ error: "This post isn't available any more." }); return null; }
+  return post;
+}
+// The comment in the URL and its post, if the viewer can see them.
+function seenComment(req, res) {
+  const id = Number(req.params.id), comment = Number.isSafeInteger(id) && db.prepare("SELECT id, post_id AS postId, user_id AS userId FROM comments WHERE id=?").get(id);
+  const post = comment && playlistPost(comment.postId);
+  if (!post || !canOpenPost(req.session.userId, post)) { res.status(404).json({ error: "That comment isn't there any more." }); return null; }
+  return { comment, post };
+}
+const canDeleteComment = (userId, comment, post) => Boolean(userId) && (comment.userId === userId || post.userId === userId
+  || isCreator(db.prepare("SELECT username FROM users WHERE id=?").get(userId)?.username));
+// A post's comments, oldest first, each with its replies (oldest first), leaving out people the viewer blocked and
+// replies to comments the viewer can't see.
+function commentsPayload(viewerId, post) {
+  const rows = db.prepare(`SELECT * FROM (
+      SELECT c.id, c.parent_id AS parentId, c.user_id AS userId, c.body, c.created_at AS createdAt, u.username, u.avatar_emoji, u.avatar_bg, u.avatar_path
+      FROM comments c JOIN users u ON u.id=c.user_id
+      WHERE c.post_id=? AND NOT EXISTS(SELECT 1 FROM blocks b WHERE b.blocker_id=? AND b.blocked_id=c.user_id)
+      ORDER BY c.id DESC LIMIT ?
+    ) ORDER BY id`).all(post.id, viewerId || 0, COMMENTS_SHOWN);
+  const reactions = reactionsOn("comment_reactions", "comment_id", rows, viewerId);
+  const shape = c => ({ id: c.id, userId: c.userId, username: c.username, avatar: avatarOf(c), body: c.body, createdAt: c.createdAt,
+    reactions: reactions[c.id] || [], canDelete: canDeleteComment(viewerId, c, post) });
+  const comments = rows.filter(c => !c.parentId).map(c => ({ ...shape(c), replies: rows.filter(r => r.parentId === c.id).map(shape) }));
+  return { comments, count: comments.reduce((n, c) => n + 1 + c.replies.length, 0) };
+}
+app.get("/api/posts/:id/comments", (req, res) => {
+  const post = seenPost(req, res);
+  if (post) res.json(commentsPayload(req.session.userId, post));
+});
+app.post("/api/posts/:id/comments", requireAuth, commentLimiter, (req, res) => {
+  const me = req.session.userId, post = seenPost(req, res);
+  if (!post) return;
+  const body = cleanText(req.body.body).slice(0, MAX_COMMENT);
+  if (!body) return res.status(400).json({ error: "Write a comment first." });
+  // A reply to a reply goes under the same comment.
+  let parent = null;
+  if (req.body.parentId != null) {
+    parent = db.prepare("SELECT id, parent_id AS parentId, user_id AS userId FROM comments WHERE id=? AND post_id=?").get(Number(req.body.parentId), post.id);
+    if (parent?.parentId) parent = db.prepare("SELECT id, user_id AS userId FROM comments WHERE id=?").get(parent.parentId);
+    if (!parent || !canSee(me, parent.userId)) return res.status(404).json({ error: "That comment isn't there any more." });
+  }
+  const commentId = Number(db.prepare("INSERT INTO comments(post_id,user_id,body,parent_id) VALUES(?,?,?,?)").run(post.id, me, body, parent?.id ?? null).lastInsertRowid);
+  if (parent) notify(parent.userId, me, "reply", { postId: post.id, commentId });
+  if (parent?.userId !== post.userId) notify(post.userId, me, "comment", { postId: post.id, commentId });
+  notifyPostTags(me, post.id, [body], commentId, [post.userId, parent?.userId]);
+  res.status(201).json(commentsPayload(me, post));
+});
+app.delete("/api/comments/:id", requireAuth, (req, res) => {
+  const me = req.session.userId, found = seenComment(req, res);
+  if (!found) return;
+  if (!canDeleteComment(me, found.comment, found.post)) return res.status(403).json({ error: "Only the person who wrote it, the person whose post it is, or the creator can delete this comment." });
+  db.prepare("DELETE FROM comments WHERE id=?").run(found.comment.id);
+  res.json(commentsPayload(me, found.post));
+});
+// Picking an emoji adds your reaction to a comment; picking the same one again takes it away.
+app.post("/api/comments/:id/reactions", requireAuth, reactionLimiter, (req, res) => {
+  const me = req.session.userId, found = seenComment(req, res);
+  if (!found) return;
+  const { comment, post } = found, emoji = String(req.body.emoji || "");
+  if (!emojiSet.has(emoji)) return res.status(400).json({ error: "Pick one of the emojis." });
+  const error = db.transaction(() => {
+    if (db.prepare("DELETE FROM comment_reactions WHERE comment_id=? AND user_id=? AND emoji=?").run(comment.id, me, emoji).changes) return null;
+    if (db.prepare("SELECT COUNT(*) AS n FROM comment_reactions WHERE comment_id=? AND user_id=?").get(comment.id, me).n >= MAX_REACTIONS) return `You can add up to ${MAX_REACTIONS} reactions to one comment.`;
+    db.prepare("INSERT INTO comment_reactions(comment_id,user_id,emoji) VALUES(?,?,?)").run(comment.id, me, emoji);
+    notify(comment.userId, me, "reaction", { postId: post.id, commentId: comment.id, emoji });
+    return null;
+  })();
+  if (error) return res.status(400).json({ error });
+  res.json(commentsPayload(me, post));
 });
 
 // ---- Playlist 🎶 ----
@@ -1206,6 +1543,17 @@ if (mailer) mailer.verify().then(
   err => console.error(`Email: couldn't sign in to ${mail.host} (${err.message}). Check the SMTP settings. 18+ codes can't be emailed.`));
 else console.log("Email: no SMTP_PASS yet, so 18+ codes are shown on screen instead of emailed.");
 const hashCode = code => crypto.createHash("sha256").update(code).digest();
+// Each new code replaces the last one, so pressing "Send the code" twice used to send two emails where only the newer
+// code worked. A code sent to the same email less than CODE_RESEND_SECONDS ago is now kept instead (unless it's used up),
+// and asking again says how long to wait. Gives the seconds left to wait, or 0 if a new code can be sent.
+const CODE_RESEND_SECONDS = 60;
+function codeResendWait(table, userId, email, minutes, maxTries) {
+  const check = db.prepare(`SELECT email, expires_at, tries, email_ok FROM ${table} WHERE user_id=?`).get(userId);
+  if (!check || check.email !== email || check.email_ok || check.tries >= maxTries) return 0;
+  const sentAt = check.expires_at - minutes * 60 * 1000;
+  return Math.max(0, Math.ceil((sentAt + CODE_RESEND_SECONDS * 1000 - Date.now()) / 1000));
+}
+const codeJustSent = (res, wait) => res.status(429).json({ error: `We sent a code less than a minute ago, so use that one. Check the email, and its spam folder. You can ask for a new code in ${wait} second${wait === 1 ? "" : "s"}.` });
 
 app.post("/api/adult/email", requireAuth, adultLimiter, async (req, res, next) => {
   const me = req.session.userId, email = String(req.body.email || "").trim().slice(0, 254);
@@ -1214,6 +1562,8 @@ app.post("/api/adult/email", requireAuth, adultLimiter, async (req, res, next) =
   if (isAdult(me)) return res.status(400).json({ error: "You've already done the 18+ checks." });
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: "Type your whole email address, like name@example.com." });
   if (!mailer && isProduction) return res.status(503).json({ error: "Yakimma can't send emails yet, so 18+ can't be turned on right now." });
+  const wait = codeResendWait("adult_checks", me, email, ADULT_CODE_MINUTES, ADULT_CODE_TRIES);
+  if (wait) return codeJustSent(res, wait);
   const code = String(crypto.randomInt(0, 1000000)).padStart(6, "0");
   db.prepare(`INSERT INTO adult_checks(user_id,email,code_hash,expires_at) VALUES(?,?,?,?)
     ON CONFLICT(user_id) DO UPDATE SET email=excluded.email, code_hash=excluded.code_hash, expires_at=excluded.expires_at, tries=0, email_ok=0`)
@@ -1221,7 +1571,8 @@ app.post("/api/adult/email", requireAuth, adultLimiter, async (req, res, next) =
   if (!mailer) return res.json({ sent: false, testCode: code });
   try {
     const sent = await mailer.sendMail({
-      from: { name: "Yakimma", address: mail.from }, to: email, subject: "Your Yakimma 18+ code",
+      // The code is in the subject too, so each email stands on its own instead of being grouped with older codes.
+      from: { name: "Yakimma", address: mail.from }, to: email, subject: `Your Yakimma 18+ code: ${code}`,
       text: `Your Yakimma 18+ code is ${code}\n\nIt works for ${ADULT_CODE_MINUTES} minutes. If you didn't ask for this code, you can ignore this email.`
     });
     // The email server's reply has an id you can look up in cPanel's Track Delivery if the email doesn't arrive.
@@ -1267,7 +1618,7 @@ const giveBloodTheme = userId => db.prepare("INSERT OR IGNORE INTO inventory(use
 
 // Only on Yakimma running on your own computer (localhost), these accounts can skip the face scan by typing their
 // username and password. It never works on the live site, or from another device on your network. Write names in small letters.
-const FACE_SCAN_SKIPPERS = ["bleh", "manhatukfayay"];
+const FACE_SCAN_SKIPPERS = ["bleh", "creator"];
 const fromThisComputer = req => !isProduction && ["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.socket.remoteAddress);
 app.post("/api/adult/face-skip", requireAuth, adultLimiter, async (req, res, next) => {
   try {
@@ -1307,6 +1658,8 @@ app.post("/api/kid/email", requireAuth, kidLimiter, async (req, res) => {
   if (inZone(me)) return res.status(403).json({ error: "Turn off 18+ first." });
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: "Type the parent's whole email address, like name@example.com." });
   if (!mailer && isProduction) return res.status(503).json({ error: "Yakimma can't send emails yet, so the kiddy zone can't be set up right now." });
+  const wait = codeResendWait("kid_checks", me, email, KID_CODE_MINUTES, KID_CODE_TRIES);
+  if (wait) return codeJustSent(res, wait);
   const code = String(crypto.randomInt(0, 1000000)).padStart(6, "0");
   db.prepare(`INSERT INTO kid_checks(user_id,email,code_hash,expires_at) VALUES(?,?,?,?)
     ON CONFLICT(user_id) DO UPDATE SET email=excluded.email, code_hash=excluded.code_hash, expires_at=excluded.expires_at, tries=0, email_ok=0`)
@@ -1316,7 +1669,7 @@ app.post("/api/kid/email", requireAuth, kidLimiter, async (req, res) => {
     : `The Yakimma account ${currentUser(req).username} wants to turn on the kiddy zone, a safe part of Yakimma for kids. Only a parent should do this.`;
   try {
     const sent = await mailer.sendMail({
-      from: { name: "Yakimma", address: mail.from }, to: email, subject: "Your Yakimma kiddy zone code",
+      from: { name: "Yakimma", address: mail.from }, to: email, subject: `Your Yakimma kiddy zone code: ${code}`,
       text: `${why}\n\nYour parent code is ${code}\n\nType it on Yakimma, then choose a parent-only password. Only that password can turn the kiddy zone off. ` +
         `The code works for ${KID_CODE_MINUTES} minutes. If you didn't ask for this code, you can ignore this email.`
     });
@@ -1357,6 +1710,9 @@ app.post("/api/kid/password", requireAuth, kidLimiter, async (req, res, next) =>
     const born = hasBirthDates(me) ? null : birthDates(req.body);
     if (born?.error) return res.status(400).json(born);
     enterKidZone(me, { email: check.email, passHash: await bcrypt.hash(password, 12), face: face?.face, born });
+    // A parent who forgot the password has often guessed wrong a few times first. Their new password is right, so the
+    // wrong guesses (and the tries spent getting the code) no longer count, or the new password would be locked too.
+    await Promise.all([kidPasswordLimiter.resetKey(req.ip), kidLimiter.resetKey(req.ip)]);
     res.json({ user: publicUser(currentUser(req)) });
   } catch (err) { next(err); }
 });
@@ -1557,7 +1913,7 @@ app.delete("/api/groups/:id", requireAuth, (req, res) => {
   const files = db.transaction(() => {
     if (!db.prepare("DELETE FROM community_groups WHERE id=? AND (owner_id=? OR ?)").run(id, me, isAdmin(me) ? 1 : 0).changes) return null;
     // The group's posts and chat go with it.
-    const media = db.prepare("SELECT media_path FROM posts WHERE group_key=? AND media_path IS NOT NULL").all(key).map(r => r.media_path);
+    const media = db.prepare("SELECT media_path, thumb_path FROM posts WHERE group_key=?").all(key).flatMap(r => [r.media_path, r.thumb_path]).filter(Boolean);
     db.prepare("DELETE FROM posts WHERE group_key=?").run(key);
     db.prepare("DELETE FROM messages WHERE group_key=?").run(key);
     return media;
@@ -1579,6 +1935,31 @@ app.get("/api/groups/:id", (req, res) => {
 });
 
 // Everyone in a group, for the list you get by tapping the faces on it. The person who made it comes first.
+// Someone tagged in a group they're not in can see the messages they were tagged in there (the newest 100 messages, and
+// any older ones they were tagged in), but nothing else: every other message comes back blurred, without who sent it
+// or what it says. Only for people who were tagged there at least once.
+app.get("/api/groups/:id/tagged", requireAuth, (req, res) => {
+  const me = req.session.userId, group = findGroup(req.params.id);
+  if (!group) return res.status(404).json({ error: "That group doesn't exist any more." });
+  const zone = groupZoneError(me, group);
+  if (zone) return res.status(zone.status).json({ error: zone.error });
+  if (isGroupMember(me, group)) return res.json({ member: true });
+  const tagged = new Set(db.prepare(`SELECT n.message_id AS id FROM notifications n JOIN messages m ON m.id=n.message_id
+    WHERE n.user_id=? AND n.kind='tag' AND m.group_key=?`).all(me, group.key).map(r => r.id));
+  if (!tagged.size) return res.status(403).json({ error: "Join the group first to see its chat." });
+  const rows = db.prepare(`SELECT m.id, m.sender_id AS userId, u.username, u.avatar_emoji, u.avatar_bg, u.avatar_path, m.body, m.created_at AS createdAt, m.deleted_at AS deletedAt
+    FROM messages m JOIN users u ON u.id=m.sender_id
+    WHERE m.group_key=? AND (m.id IN (SELECT id FROM messages WHERE group_key=? ORDER BY id DESC LIMIT 100) OR m.id IN (${[...tagged].map(() => "?").join(",")}))
+      AND NOT EXISTS(SELECT 1 FROM blocks b WHERE b.blocker_id=? AND b.blocked_id=m.sender_id)
+    ORDER BY m.id`).all(group.key, group.key, ...tagged, me);
+  res.json({
+    member: false, group: groupBrief(group.key, me),
+    messages: rows.map(m => !tagged.has(m.id) ? { id: m.id, hidden: true }
+      : m.deletedAt ? { id: m.id, deleted: true, createdAt: m.createdAt }
+      : { id: m.id, userId: m.userId, username: m.username, avatar: avatarOf(m), body: m.body, createdAt: m.createdAt })
+  });
+});
+
 app.get("/api/groups/:id/members", requireAuth, (req, res) => {
   const group = findGroup(req.params.id);
   if (!group) return res.status(404).json({ error: "That group doesn't exist any more." });
@@ -1598,6 +1979,14 @@ app.post("/api/groups/:id/posts", requireAuth, (req, res, next) => {
 });
 
 app.get("/api/friends", requireAuth, (req, res) => res.json(friendsPayload(req.session.userId)));
+
+// The 🔔 bell: your newest notifications, or just how many you haven't seen. Opening it marks them all as seen.
+app.get("/api/notifications", requireAuth, (req, res) => res.json(notificationsPayload(req.session.userId)));
+app.get("/api/notifications/unread", requireAuth, (req, res) => res.json({ unread: unreadNotifications(req.session.userId) }));
+app.post("/api/notifications/read", requireAuth, (req, res) => {
+  db.prepare("UPDATE notifications SET read_at=CURRENT_TIMESTAMP WHERE user_id=? AND read_at IS NULL").run(req.session.userId);
+  res.json({ unread: 0 });
+});
 
 // Your chat with the AI assistant. Opening or checking it marks AI's messages as read.
 app.get("/api/ai/messages", requireAuth, (req, res) => {
@@ -1622,9 +2011,11 @@ app.post("/api/friends/request", requireAuth, friendLimiter, (req, res) => {
     if (existing) {
       // They already asked us, so asking back simply accepts.
       db.prepare("UPDATE friendships SET status='accepted', responded_at=CURRENT_TIMESTAMP WHERE id=?").run(existing.id);
+      notify(other.id, me, "friend");
       return { accepted: true };
     }
     db.prepare("INSERT INTO friendships(requester_id,addressee_id) VALUES(?,?)").run(me, other.id);
+    notify(other.id, me, "request");
     return { requested: true };
   });
   const result = tx();
@@ -1633,10 +2024,12 @@ app.post("/api/friends/request", requireAuth, friendLimiter, (req, res) => {
 });
 
 app.post("/api/friends/requests/:id/accept", requireAuth, (req, res) => {
+  const me = req.session.userId, request = db.prepare("SELECT requester_id FROM friendships WHERE id=? AND addressee_id=? AND status='pending'").get(Number(req.params.id), me);
   const info = db.prepare(`UPDATE friendships SET status='accepted', responded_at=CURRENT_TIMESTAMP
-    WHERE id=? AND addressee_id=? AND status='pending'`).run(Number(req.params.id), req.session.userId);
+    WHERE id=? AND addressee_id=? AND status='pending'`).run(Number(req.params.id), me);
   if (!info.changes) return res.status(404).json({ error: "That friend request is no longer available." });
-  res.json(friendsPayload(req.session.userId));
+  notify(request.requester_id, me, "friend");
+  res.json(friendsPayload(me));
 });
 
 // Declining an incoming request and cancelling an outgoing one both remove it.
@@ -1652,7 +2045,21 @@ app.delete("/api/friends/:userId", requireAuth, (req, res) => {
   const me = req.session.userId, other = Number(req.params.userId);
   db.prepare(`DELETE FROM friendships WHERE status='accepted'
     AND ((requester_id=? AND addressee_id=?) OR (requester_id=? AND addressee_id=?))`).run(me, other, other, me);
+  endAssistants(me, other);
   res.json(friendsPayload(me));
+});
+
+// Anyone with friends can give a friend a nickname that only they see, shown instead of their name everywhere. Leaving
+// it empty takes it off. Nobody else can be nicknamed after the creator.
+app.put("/api/friends/:userId/nickname", requireAuth, (req, res) => {
+  const me = req.session.userId, friendId = Number(req.params.userId), name = String(req.body.nickname ?? "").trim().replace(/\s+/g, " ");
+  if (!Number.isSafeInteger(friendId) || !areFriends(me, friendId)) return res.status(403).json({ error: "You can only give nicknames to your friends." });
+  if ([...name].length > 30) return res.status(400).json({ error: "Nicknames can be up to 30 characters." });
+  if (/\p{Cc}/u.test(name)) return res.status(400).json({ error: "That nickname has a character that can't be used." });
+  if (name && creatorOnlyName(name) && !isCreator(db.prepare("SELECT username FROM users WHERE id=?").get(friendId).username)) return res.status(403).json({ error: CREATOR_ONLY });
+  if (name) db.prepare("INSERT INTO nicknames(owner_id,friend_id,nickname) VALUES(?,?,?) ON CONFLICT(owner_id,friend_id) DO UPDATE SET nickname=excluded.nickname").run(me, friendId, name);
+  else db.prepare("DELETE FROM nicknames WHERE owner_id=? AND friend_id=?").run(me, friendId);
+  res.json({ nicknames: nicknamesOf(me) });
 });
 
 // Group chats and friend chats share the same message actions. Each action answers with everything
@@ -1679,7 +2086,8 @@ for (const [base, chatOf] of [["/api/groups/:id/messages", groupChatOf], ["/api/
     if (!chat) return;
     const body = cleanText(req.body.body).slice(0, MAX_MESSAGE);
     if (!body) return res.status(400).json({ error: "Write a message first." });
-    insertMessage(chat, req.session.userId, body);
+    const sent = insertMessage(chat, req.session.userId, body);
+    notifyChatTags(req.session.userId, chat, Number(sent.lastInsertRowid), body);
     markRead(req.session.userId, chat);
     res.status(201).json(chatMessages(req.session.userId, chat, sinceRev(req.body.since)));
   });
@@ -1717,6 +2125,7 @@ for (const [base, chatOf] of [["/api/groups/:id/messages", groupChatOf], ["/api/
       if (!db.prepare("DELETE FROM message_reactions WHERE message_id=? AND user_id=? AND emoji=?").run(msg.id, me, emoji).changes) {
         if (db.prepare("SELECT COUNT(*) AS n FROM message_reactions WHERE message_id=? AND user_id=?").get(msg.id, me).n >= MAX_REACTIONS) return `You can add up to ${MAX_REACTIONS} reactions to one message.`;
         db.prepare("INSERT INTO message_reactions(message_id,user_id,emoji) VALUES(?,?,?)").run(msg.id, me, emoji);
+        notify(msg.sender_id, me, "reaction", { messageId: msg.id, emoji });
       }
       db.prepare("UPDATE messages SET rev=? WHERE id=?").run(nextRev(), msg.id);
     })();
@@ -1753,6 +2162,7 @@ app.post("/api/blocks", requireAuth, (req, res) => {
     db.prepare("INSERT OR IGNORE INTO blocks(blocker_id,blocked_id) VALUES(?,?)").run(me, other);
     db.prepare("DELETE FROM friendships WHERE (requester_id=? AND addressee_id=?) OR (requester_id=? AND addressee_id=?)").run(me, other, other, me);
     db.prepare("DELETE FROM follows WHERE (follower_id=? AND followee_id=?) OR (follower_id=? AND followee_id=?)").run(me, other, other, me);
+    endAssistants(me, other);
   })();
   res.json(friendsPayload(me));
 });
@@ -1771,16 +2181,117 @@ function zoneError(me, other) {
   if (!inKidZone(me) && inKidZone(other)) return "They're in the kiddy zone, so only people in the kiddy zone can add or follow them.";
   return null;
 }
+// The creator suspends someone for any number of days, with a reason they'll see, or lifts it early.
+// Nobody can suspend the creator.
+app.post("/api/users/:id/suspend", requireAuth, requireCreator, (req, res) => {
+  const id = Number(req.params.id), days = Math.floor(Number(req.body.days)), reason = cleanText(req.body.reason).slice(0, 300);
+  const u = Number.isSafeInteger(id) && db.prepare("SELECT id, username FROM users WHERE id=?").get(id);
+  if (!u) return res.status(404).json({ error: "That person couldn't be found." });
+  if (isCreator(u.username)) return res.status(400).json({ error: "The creator can't be suspended." });
+  if (!(days >= 1 && days <= MAX_SUSPENSION_DAYS)) return res.status(400).json({ error: `Choose 1 to ${MAX_SUSPENSION_DAYS} days.` });
+  const until = Date.now() + days * 24 * 60 * 60 * 1000;
+  db.prepare("UPDATE users SET suspended_until=?, suspend_reason=? WHERE id=?").run(until, reason || null, id);
+  res.json({ ok: true, until });
+});
+app.delete("/api/users/:id/suspend", requireAuth, requireCreator, (req, res) => {
+  db.prepare("UPDATE users SET suspended_until=NULL, suspend_reason=NULL WHERE id=?").run(Number(req.params.id));
+  res.json({ ok: true });
+});
+
+// ---- 🛡️ Safety: only for the creator. Every chat (friend chats and group chats), comment and private or unlisted post,
+// newest first, to keep Yakimma safe. `user` (a username) shows only what that person was part of. ----
+function safetyUser(req) {
+  const name = String(req.query.user || "").trim();
+  return name ? db.prepare("SELECT id FROM users WHERE username=?").get(name)?.id ?? -1 : null;
+}
+const SAFETY_SHOWN = 200;
+app.get("/api/safety/chats", requireAuth, requireCreator, (req, res) => {
+  const who = safetyUser(req);
+  const friend = db.prepare(`SELECT MIN(sender_id, recipient_id) AS a, MAX(sender_id, recipient_id) AS b, COUNT(*) AS messages, MAX(created_at) AS lastAt
+    FROM messages WHERE recipient_id IS NOT NULL ${who ? "AND (sender_id=? OR recipient_id=?)" : ""} GROUP BY a, b ORDER BY lastAt DESC LIMIT ?`).all(...(who ? [who, who] : []), SAFETY_SHOWN);
+  const person = id => personBrief(db.prepare("SELECT id, username, avatar_emoji, avatar_bg, avatar_path FROM users WHERE id=?").get(id));
+  const groups = db.prepare(`SELECT group_key AS key, COUNT(*) AS messages, MAX(created_at) AS lastAt FROM messages
+    WHERE group_key IS NOT NULL ${who ? "AND group_key IN (SELECT group_key FROM messages WHERE sender_id=?)" : ""} GROUP BY group_key ORDER BY lastAt DESC LIMIT ?`).all(...(who ? [who] : []), SAFETY_SHOWN);
+  res.json({
+    friends: friend.map(c => ({ a: person(c.a), b: person(c.b), messages: c.messages, lastAt: c.lastAt })),
+    groups: groups.map(g => ({ ...(groupBrief(g.key, 0) || { key: g.key, name: "A deleted group", icon: "🏘️" }), messages: g.messages, lastAt: g.lastAt }))
+  });
+});
+// One chat, read-only: between two people (a and b), or a group's.
+app.get("/api/safety/chat", requireAuth, requireCreator, (req, res) => {
+  const a = Number(req.query.a), b = Number(req.query.b), group = req.query.group ? String(req.query.group) : null;
+  const rows = db.prepare(`SELECT * FROM (SELECT m.id, m.sender_id AS userId, u.username, u.avatar_emoji, u.avatar_bg, u.avatar_path, m.body, m.created_at AS createdAt, m.deleted_at AS deletedAt
+      FROM messages m JOIN users u ON u.id=m.sender_id
+      WHERE ${group ? "m.group_key=?" : "((m.sender_id=? AND m.recipient_id=?) OR (m.sender_id=? AND m.recipient_id=?))"} ORDER BY m.id DESC LIMIT ?) ORDER BY id`)
+    .all(...(group ? [group] : [a, b, b, a]), SAFETY_SHOWN);
+  res.json({ messages: rows.map(m => ({ id: m.id, userId: m.userId, username: m.username, avatar: avatarOf(m), body: m.body, createdAt: m.createdAt, deleted: Boolean(m.deletedAt) })) });
+});
+app.get("/api/safety/comments", requireAuth, requireCreator, (req, res) => {
+  const who = safetyUser(req);
+  const rows = db.prepare(`SELECT c.id, c.body, c.created_at AS createdAt, c.user_id AS userId, u.username, u.avatar_emoji, u.avatar_bg, u.avatar_path,
+      p.id AS postId, p.code AS postCode, p.caption AS postCaption, p.group_key AS postGroup, p.visibility
+    FROM comments c JOIN users u ON u.id=c.user_id JOIN posts p ON p.id=c.post_id ${who ? "WHERE c.user_id=?" : ""} ORDER BY c.id DESC LIMIT ?`).all(...(who ? [who] : []), SAFETY_SHOWN);
+  res.json({ comments: rows.map(c => ({ id: c.id, body: c.body, createdAt: c.createdAt, userId: c.userId, username: c.username, avatar: avatarOf(c),
+    post: { id: c.postId, code: c.postCode, caption: c.postCaption, groupKey: c.postGroup, visibility: c.visibility } })) });
+});
+app.get("/api/safety/posts", requireAuth, requireCreator, (req, res) => {
+  const who = safetyUser(req);
+  res.json({ posts: selectPosts(req.session.userId, `p.visibility<>'public'${who ? " AND p.user_id=?" : ""}`, who ? [who] : [], "DESC", SAFETY_SHOWN) });
+});
+app.get("/api/safety/suspended", requireAuth, requireCreator, (req, res) => {
+  const rows = db.prepare("SELECT id, username, avatar_emoji, avatar_bg, avatar_path, suspended_until, suspend_reason FROM users WHERE suspended_until>? ORDER BY suspended_until").all(Date.now());
+  res.json({ users: rows.map(u => ({ ...personBrief(u), suspended: suspensionOf(u) })) });
+});
+
+// ---- 🤝 Assistant ----
+// Everyone can choose one friend they trust as their assistant. Anyone can see it on both their profiles: "Assistant"
+// on yours, and "Assistant to" on theirs. Nobody can choose one in the kiddy zone, and choosing someone follows the same
+// zone rules as following them. When two people stop being friends (or one blocks the other), the assistant goes.
+const personBrief = u => ({ id: u.id, username: u.username, avatar: avatarOf(u) });
+const endAssistants = (a, b) => db.prepare("UPDATE users SET assistant_id=NULL WHERE (id=? AND assistant_id=?) OR (id=? AND assistant_id=?)").run(a, b, b, a);
+function assistantInfo(viewerId, userId) {
+  const a = db.prepare("SELECT u.id, u.username, u.avatar_emoji, u.avatar_bg, u.avatar_path FROM users o JOIN users u ON u.id=o.assistant_id WHERE o.id=?").get(userId);
+  const of = db.prepare("SELECT id, username, avatar_emoji, avatar_bg, avatar_path FROM users WHERE assistant_id=? ORDER BY username COLLATE NOCASE LIMIT 100").all(userId);
+  return { assistant: a && canSee(viewerId, a.id) ? personBrief(a) : null, assistantOf: of.filter(u => canSee(viewerId, u.id)).map(personBrief) };
+}
+app.put("/api/me/assistant", requireAuth, (req, res) => {
+  const me = req.session.userId, id = req.body.userId == null ? null : Number(req.body.userId);
+  if (id !== null) {
+    if (inKidZone(me)) return res.status(403).json({ error: "You can't choose an assistant in the kiddy zone." });
+    if (!Number.isSafeInteger(id) || !db.prepare("SELECT 1 FROM users WHERE id=?").get(id) || !canSee(me, id)) return res.status(404).json({ error: "That person couldn't be found." });
+    if (id === me) return res.status(400).json({ error: "You can't be your own assistant." });
+    if (!areFriends(me, id)) return res.status(403).json({ error: "You can only choose a friend as your assistant. Send them a friend request first." });
+    const zoneErr = zoneError(me, id);
+    if (zoneErr) return res.status(403).json({ error: zoneErr.replace("add and follow", "choose") });
+  }
+  const before = db.prepare("SELECT assistant_id FROM users WHERE id=?").get(me).assistant_id;
+  db.prepare("UPDATE users SET assistant_id=? WHERE id=?").run(id, me);
+  if (id && id !== before) notify(id, me, "assistant");
+  res.json({ user: publicUser(currentUser(req)) });
+});
 // Someone in a list of people, with how many followers they have and how many people they follow.
 const personItem = u => ({ id: u.id, username: u.username, avatar: avatarOf(u), ...followCounts(u.id) });
 const SEARCH_RESULTS = 20;
+// Finds people by their username, an admin's display name, or a nickname you gave a friend.
 app.get("/api/users", requireAuth, (req, res) => {
-  const me = req.session.userId, q = String(req.query.q || "").replace(/[^A-Za-z0-9]/g, "").slice(0, 20);
-  if (!q) return res.json({ users: [] });
-  // Exact matches first, then names that start with the search, then shorter names.
-  const users = db.prepare(`SELECT id, username, avatar_emoji, avatar_bg, avatar_path FROM users WHERE username LIKE ? AND id<>?
-    ORDER BY lower(username)=lower(?) DESC, username LIKE ? DESC, length(username), username COLLATE NOCASE LIMIT 200`).all(`%${q}%`, me, q, `${q}%`)
-    .filter(u => canSee(me, u.id)).slice(0, SEARCH_RESULTS).map(personItem);
+  const me = req.session.userId, text = String(req.query.q || "").trim().replace(/\s+/g, " ").slice(0, 30);
+  const q = text.replace(/[^A-Za-z0-9]/g, "").slice(0, 20);
+  if (!text) return res.json({ users: [] });
+  // Usernames: exact matches first, then names that start with the search, then shorter names.
+  const byUsername = q ? db.prepare(`SELECT id, username, avatar_emoji, avatar_bg, avatar_path FROM users WHERE username LIKE ? AND id<>?
+    ORDER BY lower(username)=lower(?) DESC, username LIKE ? DESC, length(username), username COLLATE NOCASE LIMIT 200`).all(`%${q}%`, me, q, `${q}%`) : [];
+  const like = `%${text.replace(/[\\%_]/g, "\\$&")}%`;
+  const byDisplayName = db.prepare(`SELECT id, username, display_name, avatar_emoji, avatar_bg, avatar_path FROM users WHERE display_name LIKE ? ESCAPE '\\' AND id<>?`)
+    .all(like, me).filter(u => canHaveDisplayName(u.username));
+  // The nicknames you gave your friends find them too (only for you).
+  const byNickname = db.prepare(`SELECT u.id, u.username, n.nickname, u.avatar_emoji, u.avatar_bg, u.avatar_path FROM nicknames n JOIN users u ON u.id=n.friend_id
+    WHERE n.owner_id=? AND n.nickname LIKE ? ESCAPE '\\'`).all(me, like).filter(u => areFriends(me, u.id));
+  // Someone whose username, display name or nickname is exactly the search comes first, then nicknames, display names
+  // and usernames.
+  const exact = u => [u.username, u.display_name, u.nickname].some(n => n?.toLowerCase() === text.toLowerCase());
+  const seen = new Set();
+  const users = [...byNickname, ...byDisplayName, ...byUsername].sort((a, b) => exact(b) - exact(a))
+    .filter(u => !seen.has(u.id) && seen.add(u.id) && canSee(me, u.id)).slice(0, SEARCH_RESULTS).map(personItem);
   res.json({ users });
 });
 // Everyone you could find, a page at a time in sign-up order, for scrolling through on the Friends page. `after` is
@@ -1817,6 +2328,8 @@ function profilePayload(viewerId, userId) {
     friend: !f ? "none" : f.status === "accepted" ? "friends" : f.requesterId === viewerId ? "sent" : "received",
     zoneNote: zoneError(viewerId, userId),
     requestId: f?.id ?? null,
+    ...assistantInfo(viewerId, userId),
+    suspended: isCreator(db.prepare("SELECT username FROM users WHERE id=?").get(viewerId)?.username) ? suspensionOf(db.prepare("SELECT suspended_until, suspend_reason FROM users WHERE id=?").get(userId)) : null,
     posts: selectPosts(viewerId, `p.user_id=? AND p.group_key IS NULL AND ${SEES_POST} AND p.adult=? AND p.kid=?`, [userId, viewerId, viewerId, viewerId, ...postZone(viewerId)], "DESC", 30)
   };
 }
@@ -1849,7 +2362,7 @@ app.post("/api/users/:id/follow", requireAuth, followLimiter, (req, res) => {
   if (id === me) return res.status(400).json({ error: "You can't follow yourself." });
   const zoneErr = zoneError(me, id);
   if (zoneErr) return res.status(403).json({ error: zoneErr });
-  db.prepare("INSERT OR IGNORE INTO follows(follower_id,followee_id) VALUES(?,?)").run(me, id);
+  if (db.prepare("INSERT OR IGNORE INTO follows(follower_id,followee_id) VALUES(?,?)").run(me, id).changes) notify(id, me, "follow");
   res.json(profilePayload(me, id));
 });
 app.delete("/api/users/:id/follow", requireAuth, (req, res) => {
@@ -1870,7 +2383,13 @@ app.put("/api/me/hand-tone", requireAuth, (req, res) => {
   res.json({ user: publicUser(currentUser(req)) });
 });
 
-app.put("/api/me/avatar", requireAuth, (req, res) => {
+// Accounts with a fixed picture can't save a new one. This runs before the upload, so no file is kept.
+function requireChangeableAvatar(req, res, next) {
+  if (fixedAvatarOf(currentUser(req).username)) return res.status(403).json({ error: "Your profile picture is fixed, so it can't be changed." });
+  next();
+}
+
+app.put("/api/me/avatar", requireAuth, requireChangeableAvatar, (req, res) => {
   const { emoji, bg } = req.body;
   if (!avatarOptions.emojis.includes(emoji) || !hasOption(avatarOptions.backgrounds, bg)) return res.status(400).json({ error: "Choose one of the avatar characters and backgrounds." });
   db.prepare("UPDATE users SET avatar_emoji=?, avatar_bg=? WHERE id=?").run(emoji, bg, req.session.userId);
@@ -1879,7 +2398,7 @@ app.put("/api/me/avatar", requireAuth, (req, res) => {
   res.json({ user: publicUser(currentUser(req)) });
 });
 
-app.post("/api/me/avatar-photo", requireAuth, (req, res, next) => {
+app.post("/api/me/avatar-photo", requireAuth, requireChangeableAvatar, (req, res, next) => {
   avatarUpload.single("photo")(req, res, err => {
     if (err) return res.status(400).json({ error: err.code === "LIMIT_FILE_SIZE" ? "Profile pictures must be 5 MB or smaller." : err.message || "Upload could not be completed." });
     if (!req.file) return res.status(400).json({ error: "Choose a picture first." });
@@ -1894,7 +2413,7 @@ app.post("/api/me/avatar-photo", requireAuth, (req, res, next) => {
   });
 });
 
-app.delete("/api/me/avatar-photo", requireAuth, (req, res) => {
+app.delete("/api/me/avatar-photo", requireAuth, requireChangeableAvatar, (req, res) => {
   setAvatarPhoto(req.session.userId, null);
   res.json({ user: publicUser(currentUser(req)) });
 });
