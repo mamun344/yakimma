@@ -66,6 +66,8 @@
   // display name if they're an admin (the creator too), with their @username after it. Otherwise just their username.
   const shownName = username => state.social?.nicknames?.[username?.toLowerCase()] || state.displayNames?.[username?.toLowerCase()];
   const nameText = username => shownName(username) || username;
+  // Nobody can report or block the creator, so their posts, comments and messages don't have those buttons.
+  const isCreatorName = username => username?.toLowerCase() === "creator";
   const nameHTML = username => {
     const shown = shownName(username);
     return shown ? `${safe(shown)} <small class="at-name">@${safe(username)}</small>` : safe(username);
@@ -101,7 +103,11 @@
     comment: () => "commented on your post 💬",
     reply: () => "replied to your comment 💬",
     reaction: n => `reacted ${safe(n.emoji)} to your ${n.comment ? "comment" : "message"}`,
-    assistant: () => "made you their assistant 🤝"
+    assistant: () => "made you their assistant 🤝",
+    // Only the creator gets these: someone reported something for "Something else", with their own words, and
+    // someone's face scan didn't agree with the gender they picked.
+    report: n => `reported a ${n.comment ? "comment" : "post"} 🚩`,
+    gender: () => "is waiting for you to choose Boy or Girl for them 🚻"
   };
   // Opening the bell shows the newest notifications (new ones highlighted) and marks them all as seen.
   async function toggleBell() {
@@ -109,15 +115,30 @@
     const d = await api("/api/notifications");
     state.notifications = d.notifications;
     const row = n => `<button class="notif ${n.read ? "" : "new"}" role="menuitem" data-notif="${n.id}">${avatarHTML(n.actor.avatar, "tiny")}<span><strong>${nameHTML(n.actor.username)}</strong> ${NOTIFY_TEXT[n.kind]?.(n) || ""}` +
-      `${n.comment ? `<small class="notif-quote">“${safe(n.comment.preview)}”</small>` : ""}<small>${timeLabel(n.createdAt)}</small></span></button>`;
+      `${n.details || n.comment ? `<small class="notif-quote">“${safe(n.details || n.comment.preview)}”</small>` : ""}<small>${timeLabel(n.createdAt)}</small></span></button>`;
     $(".top-actions").insertAdjacentHTML("beforeend", `<div class="notif-menu" id="notifMenu" role="menu" aria-label="Notifications"><h2>🔔 Notifications</h2>` +
       (d.notifications.length ? d.notifications.map(row).join("") : `<p class="muted">Nothing yet. When someone tags you, follows you, sends or accepts a friend request, or likes or comments on your post, it shows up here.</p>`) + `</div>`);
     if (d.unread) await api("/api/notifications/read", { method: "POST" });
     state.unread = 0; bell();
   }
-  // Tapping a notification opens what it's about: the post (with its comments), the chat, or the person's profile.
+  // Tapping a notification opens what it's about: the post (with its comments), the chat, or the person's profile. A
+  // report opens the Reports page, so the creator can deal with it.
   async function openNotification(n) {
     $("#notifMenu")?.remove();
+    if (n.kind === "report") {
+      if (pageGone("reports")) return toast(goneNote("reports"), true);
+      history.replaceState(null, "", "/");
+      Object.assign(state, { page: "reports", notice: "", groupView: null, chat: null });
+      render(); await loadPageData(); render();
+      return;
+    }
+    if (n.kind === "gender") {
+      if (pageGone("safety")) return toast(goneNote("safety"), true);
+      history.replaceState(null, "", "/");
+      Object.assign(state, { page: "safety", notice: "", groupView: null, chat: null, safety: { tab: "genders", user: "" } });
+      render(); await loadPageData(); render();
+      return;
+    }
     if (n.post) {
       if (n.comment) (state.comments ||= {})[n.post.id] = { open: true };
       if (n.post.groupKey) { await openGroup(n.post.groupKey, "posts"); if (n.comment) await loadComments(n.post.id); return; }
@@ -177,6 +198,7 @@
     const [me, feed] = await Promise.all([api("/api/me"), api("/api/posts")]);
     state.user = me.user; state.displayNames = me.displayNames || {}; state.unread = me.notifications || 0; state.products = me.products || []; state.inventory = me.inventory || []; state.posts = feed.posts || []; state.learnData = me.learn || null; state.reportReasons = me.reportReasons || []; state.usernameCost = me.usernameCost; state.songs = me.songs || [];
     if (me.religions) Object.assign(state, { religions: me.religions, countries: me.countries });
+    state.googleSignIn = Boolean(me.googleSignIn);
     if (me.themes) state.themes = me.themes;
     if (me.nailOptions) state.nailOptions = me.nailOptions;
     if (me.avatarOptions) state.avatarOptions = me.avatarOptions;
@@ -363,7 +385,7 @@
   function messageTools(m, mine) {
     const canDelete = mine || state.chat.moderator;
     return `<div class="msg-tools" role="toolbar" aria-label="Message actions"><div class="quick">${QUICK_REACTIONS.map(e => `<button class="emoji-btn" data-react="${e}" data-msg="${m.id}" aria-label="React with ${e}">${e}</button>`).join("")}<button class="emoji-btn more" data-react-more="${m.id}" aria-label="All emojis" title="All emojis">＋</button></div>` +
-      `<div class="tool-row"><button class="soft" data-forward-msg="${m.id}">↪️ Forward</button>${mine && !m.forwarded ? `<button class="soft" data-edit-msg="${m.id}">✏️ Edit</button>` : ""}${canDelete ? `<button class="soft" data-delete-msg="${m.id}">🗑️ Delete</button>` : ""}${mine ? "" : `<button class="soft" data-block="${m.userId}" data-name="${safe(m.username)}">🚫 Block</button>`}</div></div>`;
+      `<div class="tool-row"><button class="soft" data-forward-msg="${m.id}">↪️ Forward</button>${mine && !m.forwarded ? `<button class="soft" data-edit-msg="${m.id}">✏️ Edit</button>` : ""}${canDelete ? `<button class="soft" data-delete-msg="${m.id}">🗑️ Delete</button>` : ""}${mine || isCreatorName(m.username) ? "" : `<button class="soft" data-block="${m.userId}" data-name="${safe(m.username)}">🚫 Block</button>`}</div></div>`;
   }
   // A chat can bring its own empty message (group chats do); friend chats use this one.
   const emptyChat = "No messages yet. Say hi! 👋";
@@ -624,7 +646,7 @@
     const friend = {
       friends: `<button class="soft" disabled>👯 Friends ✓</button>`,
       sent: `<button class="soft" disabled>💌 Friend request sent</button>`,
-      received: `<button class="primary" data-accept-person="${p.requestId}">💌 Accept Friend Request</button>`,
+      received: `<button class="primary" data-accept-person="${p.requestId}">💌 Accept Friend Request</button><button class="soft" data-decline-person="${p.requestId}">Decline</button>`,
       none: `<button class="primary" data-friend-person="${safe(u.username)}">💌 Send Friend Request</button>`
     }[p.friend];
     const follow = p.youFollow ? `<button class="soft" data-unfollow="${u.id}">✓ Following</button>` : `<button class="primary" data-follow="${u.id}">➕ Follow</button>`;
@@ -635,7 +657,7 @@
     const helper = state.user.assistant?.id === u.id ? `<button class="soft" data-assistant-remove="1">🤝 Your assistant ✓</button>`
       : isFriend && !kidOn() && !p.zoneNote ? `<button class="soft" data-assistant="${u.id}">🤝 Make my assistant</button>` : "";
     const nickname = isFriend ? `<button class="soft" data-nickname="${u.id}" data-name="${safe(u.username)}">🏷️ Nickname</button>` : "";
-    const suspend = !state.user.creator || u.username.toLowerCase() === "creator" ? ""
+    const suspend = !state.user.creator || isCreatorName(u.username) ? ""
       : p.suspended ? `<button class="soft" data-unsuspend="${u.id}" data-name="${safe(u.username)}">Lift the suspension</button>` : `<button class="soft" data-suspend="${u.id}" data-name="${safe(u.username)}">⛔ Suspend</button>`;
     const actions = (p.zoneNote ? `${p.friend === "none" ? "" : friend}${p.youFollow ? follow : ""}` : friend + follow) + helper + nickname + suspend;
     // Like a YouTube channel: everything, just their videos, or just their photo and text posts.
@@ -643,7 +665,7 @@
     const lists = { all: p.posts, videos: p.posts.filter(isVideo), posts: p.posts.filter(x => !isVideo(x)) }, shown = lists[tab];
     const tabs = [["all", "All"], ["videos", "🎬 Videos"], ["posts", "📝 Posts"]].map(([id, label]) => `<button class="step ${tab === id ? "on" : ""}" data-person-tab="${id}" aria-pressed="${tab === id}">${label} (${lists[id].length})</button>`).join("");
     return hero(`${safe(nameText(u.username))} 👤`, `See ${safe(nameText(u.username))}'s wallet, items and posts, send a friend request, or follow them.`, "PROFILE") +
-      `<section class="panel"><button class="soft" data-page="friends">← Friends</button><div class="posthead" style="margin-top:12px">${avatarHTML(u.avatar, "big")}<div><h2 style="margin:0">${nameHTML(u.username)}</h2>` +
+      `<section class="panel"><button class="soft" data-page="friends">← Friends</button><div class="posthead" style="margin-top:12px"><button class="avatar-edit" data-view-avatar="person" aria-label="See ${safe(nameText(u.username))}'s profile picture">${avatarHTML(u.avatar, "big")}</button><div><h2 style="margin:0">${nameHTML(u.username)}</h2>` +
       `<small>🔢 Account number ${u.accountNumber}${p.followsYou ? " · Follows you" : ""}</small></div></div>` +
       `<div class="row person-things">${thing("🐱", p.mc, "MC")}${thing("💌", p.lc, "LC")}${thing("🎁", p.items, plural(p.items, "item"))}${thing("👯", p.friends, plural(p.friends, "friend"))}${identityPills(u)}` +
       `${followPills(u.id, p.followers, p.following, u.username)}</div>${p.suspended ? `<p class="notice error">⛔ Suspended until ${safe(untilText(p.suspended))}${p.suspended.reason ? `: ${safe(p.suspended.reason)}` : ""}</p>` : ""}${assistantLines(p, false)}${actions ? `<div class="actions">${actions}</div>` : ""}${p.zoneNote ? `<p class="muted-note">${safe(p.zoneNote)}</p>` : ""}</section>` +
@@ -653,7 +675,7 @@
     const top = hero("Friends 👯", "Search for people by their username or display name to see their profile, then send them a friend request or follow them. Friends can do each other's nails in the Nail Salon.", "YOUR PEOPLE");
     if (!state.user) return top + signInPanel("Sign in to add friends.");
     const { friends, incoming, outgoing, blocked = [] } = state.social;
-    const block = p => `<button class="soft" data-block="${p.userId ?? p.id}" data-name="${safe(p.username)}">🚫 Block</button>`;
+    const block = p => isCreatorName(p.username) ? "" : `<button class="soft" data-block="${p.userId ?? p.id}" data-name="${safe(p.username)}">🚫 Block</button>`;
     const ai = state.social.ai;
     if (state.chat?.ai && ai) return hero("AI assistant 🤖", "Yakimma's AI sends you tips here, like how to get what you need in the Shop.", "AI ASSISTANT") +
       `<section class="panel"><div class="row chat-head"><button class="soft" data-page="friends">← Friends</button>${avatarHTML(ai.avatar)}<strong>${safe(ai.username)}</strong></div>${chatBox()}</section>`;
@@ -1090,6 +1112,35 @@
     ["unlisted", "🔗 Unlisted", "Only your friends on Yakimma can see it (and the creator, who keeps Yakimma safe)."],
     ["private", "🔒 Private", "Only you can see it, on your profile (and the creator, who keeps Yakimma safe)."]
   ];
+  // Who a post is for: [id, label, what it means]. Boys see Boys and Both, girls see Girls and Both.
+  const AUDIENCE = [
+    ["boys", "💙 Boys", "Only boys see it (and the creator)."],
+    ["girls", "💗 Girls", "Only girls see it (and the creator)."],
+    ["both", "💜 Both", "Boys and girls see it. Choose this if it's for everyone."]
+  ];
+  // The label on a post saying who it's for. The person who posted it, and the creator, can tap it to change it.
+  function audiencePill(p) {
+    const [, label] = AUDIENCE.find(a => a[0] === p.audience) || AUDIENCE[2];
+    return state.user && (state.user.id === p.userId || state.user.creator)
+      ? ` <button class="pill aud ${p.audience}" data-post-audience="${p.id}" title="Change who it's for">${label} ✏️</button>` : ` <span class="pill aud ${p.audience}">${label}</span>`;
+  }
+  function audienceModal(id) {
+    const now = shownPosts(id)[0]?.audience || "both";
+    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="audTitle"><div class="row between"><h2 id="audTitle">🚻 Who is it for?</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
+      `<form id="audForm"><fieldset class="visibility"><legend>Who this post is for</legend>${AUDIENCE.map(([a, label, about]) => `<label class="vis-option"><input type="radio" name="newAudience" value="${a}" ${a === now ? "checked" : ""}><span><strong>${label}</strong><small>${about}</small></span></label>`).join("")}</fieldset>` +
+      `<div class="actions"><button class="primary" type="submit">Save</button></div></form><p class="muted-note error-text" id="audError" role="alert"></p></section></div>`;
+    $("#closeModal").onclick = closeModal;
+    $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
+    $("#audForm").onsubmit = async e => {
+      e.preventDefault();
+      const audience = $('input[name="newAudience"]:checked').value;
+      try {
+        await api(`/api/posts/${id}/audience`, send("PUT", { audience }));
+        for (const p of shownPosts(id)) p.audience = audience;
+        closeModal(); render(); toast(`Now it's for: ${AUDIENCE.find(a => a[0] === audience)[1]}`);
+      } catch (err) { $("#audError").textContent = err.message; }
+    };
+  }
   const postLink = code => `${location.origin}/post/${code}`;
   // Every copy of a post that's on show (feed, profiles, a group, its own page), to update them all at once.
   const shownPosts = id => [state.posts, state.myPosts?.posts, state.playlist, state.groupView?.posts, state.reports?.posts, state.person?.posts, state.single?.post && [state.single.post]]
@@ -1113,14 +1164,14 @@
       } catch (err) { $("#visError").textContent = err.message; }
     };
   }
-  // Delete for your own posts (and every post, for admins); Report for other people's. You can change who sees your own
+  // Delete for your own posts (and every post, for the creator); Report for other people's (not the creator's). You can change who sees your own
   // posts (not group posts, which the whole group sees). Every post outside a group has its own link to copy.
   function postTools(p) {
     if (!state.user) return "";
     const mine = state.user.id === p.userId;
     return (mine && !p.inGroup ? `<button class="soft" data-post-visibility="${p.id}">👁️ Who can see it</button>` : "") +
       (mine && p.mediaType?.startsWith("video/") ? `<button class="soft" data-post-thumb="${p.id}">🖼️ Thumbnail</button>` : "") +
-      (p.inGroup ? "" : `<button class="soft" data-copy-link="${safe(p.code)}" data-visibility="${p.visibility}">🔗 Copy link</button>`) + (mine || state.user.admin ? `<button class="soft" data-delete-post="${p.id}">🗑️ Delete</button>` : "") + (mine ? "" : `<button class="soft" data-report-post="${p.id}">🚩 Report</button>`);
+      (p.inGroup ? "" : `<button class="soft" data-copy-link="${safe(p.code)}" data-visibility="${p.visibility}">🔗 Copy link</button>`) + (mine || state.user.creator ? `<button class="soft" data-delete-post="${p.id}">🗑️ Delete</button>` : "") + (mine || isCreatorName(p.username) ? "" : `<button class="soft" data-report-post="${p.id}">🚩 Report</button>`);
   }
   // Putting a post in your playlist, or taking it out. Every copy of the post on show changes, and the playlist on your
   // Profile loads again next time (taking a post out there removes it straight away).
@@ -1148,13 +1199,14 @@
     if (state.single?.post?.id === id) state.single = { error: "This post was deleted." };
     toast("The post is deleted 🗑️");
   }
-  // The last reason, "Something else", needs the reporter to say what's wrong in their own words. The admins see it.
+  // The last reason, "Something else", opens a box under it for the reporter to say what's wrong in their own words.
+  // Their words go to the creator (and show on the Reports page).
   function reportModal(id, kind = "post") {
     const other = state.reportReasons.length - 1;
     $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="reportTitle"><div class="row between"><h2 id="reportTitle">🚩 Report this ${kind}</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
       `<p>Why are you reporting it? Yakimma's admins will look at it.</p><div class="grade-list">${state.reportReasons.map((r, i) => `<button class="soft" data-reason="${i}" ${i === other ? `aria-expanded="false"` : ""}>${safe(r)}</button>`).join("")}</div>` +
-      `<form id="reportOtherForm" hidden><label for="reportDetails">What's wrong? Write it in your own words</label><textarea id="reportDetails" maxlength="500" rows="3" required placeholder="Tell the admins what's wrong with this ${kind}"></textarea>` +
-      `<p class="muted-note">The admins will see what you write with your report.</p><div class="actions"><button class="primary" type="submit">Send report 🚩</button></div></form>` +
+      `<form id="reportOtherForm" hidden><label for="reportDetails">What's wrong? Write it in your own words</label><textarea id="reportDetails" maxlength="500" rows="3" required placeholder="Tell the creator what's wrong with this ${kind}"></textarea>` +
+      `<p class="muted-note">What you write goes to the creator.</p><div class="actions"><button class="primary" type="submit">Send report 🚩</button></div></form>` +
       `<p class="muted-note error-text" id="reportError" role="alert"></p></section></div>`;
     $("#closeModal").onclick = closeModal;
     $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
@@ -1170,21 +1222,24 @@
   }
   // The Reports page, only for admins and not in the kiddy zone: reported 18+ posts in the 18+ zone, and reported
   // posts from the normal site and the kiddy zone everywhere else, with who reported them and why.
-  // The creator can also suspend whoever posted it, or someone who made a false report.
+  // Only the creator can do anything about them: suspend whoever posted it (or someone who made a false report), delete
+  // it, or keep it. The other admins can only look.
   function reportsPage() {
     const creator = state.user.creator;
-    const top = hero("Reports 🚩", creator ? "Posts and comments people reported. Suspend the person, delete it, or keep it if it's fine. If a report is false, you can suspend whoever sent it." : "Posts and comments people reported. Delete the ones that break the rules, or keep the ones that are fine.", "ADMINS ONLY");
+    const top = hero("Reports 🚩", creator ? "Posts and comments people reported. Suspend the person, delete it, or keep it if it's fine. If a report is false, you can suspend whoever sent it." : "Posts and comments people reported. You can see them, but only the creator can suspend, delete or keep them.", "ADMINS ONLY");
+    const actions = buttons => creator ? `<div class="actions">${buttons}</div>` : "";
     const list = state.reports?.posts, comments = state.reports?.comments || [];
     if (!list) return top + `<section class="panel empty">Loading…</section>`;
-    const suspendBtn = (id, name, label, reason) => creator ? `<button class="soft" data-suspend="${id}" data-name="${safe(name)}" data-reason="${safe(reason)}">⛔ ${label}</button>` : "";
+    // The creator can't be suspended, so there's no button on their own posts, comments or reports.
+    const suspendBtn = (id, name, label, reason) => creator && id !== state.user.id ? `<button class="soft" data-suspend="${id}" data-name="${safe(name)}" data-reason="${safe(reason)}">⛔ ${label}</button>` : "";
     const reasons = reports => `<ul class="report-reasons">${reports.map(r => `<li>${personLink(r.reporterId, r.username, `<strong>${nameHTML(r.username)}</strong>`)}: ${safe(r.reason)} <small>${timeLabel(r.createdAt)}</small>` +
-      `${creator ? `<button class="link-btn" data-suspend="${r.reporterId}" data-name="${safe(r.username)}" data-reason="False report">⛔ Suspend for a false report</button>` : ""}${r.details ? `<blockquote class="report-words">“${safe(r.details)}”</blockquote>` : ""}</li>`).join("")}</ul>`;
+      `${creator && r.reporterId !== state.user.id ? `<button class="link-btn" data-suspend="${r.reporterId}" data-name="${safe(r.username)}" data-reason="False report">⛔ Suspend for a false report</button>` : ""}${r.details ? `<blockquote class="report-words">“${safe(r.details)}”</blockquote>` : ""}</li>`).join("")}</ul>`;
     const times = n => `${n} time${n === 1 ? "" : "s"}`;
     const posts = list.map(p => `<section class="panel report"><h3>🚩 Post reported ${times(p.reports.length)}${p.kid ? ` <span class="pill">🧸 Kiddy zone post</span>` : ""}</h3>${reasons(p.reports)}` +
-      `${postCard(p)}<div class="actions">${suspendBtn(p.userId, p.username, `Suspend ${safe(nameText(p.username))}`, "Your post broke Yakimma's rules")}<button class="danger" data-delete-post="${p.id}">🗑️ Delete the post</button><button class="soft" data-keep-post="${p.id}">✅ It's fine, keep it</button></div></section>`).join("");
+      `${postCard(p)}${actions(`${suspendBtn(p.userId, p.username, `Suspend ${safe(nameText(p.username))}`, "Your post broke Yakimma's rules")}<button class="danger" data-delete-post="${p.id}">🗑️ Delete the post</button><button class="soft" data-keep-post="${p.id}">✅ It's fine, keep it</button>`)}</section>`).join("");
     const reportedComments = comments.map(c => `<section class="panel report"><h3>🚩 Comment reported ${times(c.reports.length)}${c.kid ? ` <span class="pill">🧸 Kiddy zone</span>` : ""}</h3>${reasons(c.reports)}` +
       `<div class="comment">${personLink(c.userId, c.username, avatarHTML(c.avatar, "tiny"))}<div class="comment-body"><div class="comment-head">${personLink(c.userId, c.username, `<strong>${nameHTML(c.username)}</strong>`)}<small>${timeLabel(c.createdAt)}</small></div><p>${richText(c.body)}</p><small class="muted">On the post “${safe(c.post.caption)}”</small></div></div>` +
-      `<div class="actions">${suspendBtn(c.userId, c.username, `Suspend ${safe(nameText(c.username))}`, "Your comment broke Yakimma's rules")}${c.canDelete ? `<button class="danger" data-report-comment-delete="${c.id}">🗑️ Delete the comment</button>` : ""}<button class="soft" data-keep-comment="${c.id}">✅ It's fine, keep it</button></div></section>`).join("");
+      `${actions(`${suspendBtn(c.userId, c.username, `Suspend ${safe(nameText(c.username))}`, "Your comment broke Yakimma's rules")}${c.canDelete ? `<button class="danger" data-report-comment-delete="${c.id}">🗑️ Delete the comment</button>` : ""}<button class="soft" data-keep-comment="${c.id}">✅ It's fine, keep it</button>`)}</section>`).join("");
     return top + (posts + reportedComments || `<section class="panel empty">No reported posts or comments right now. 🎉</section>`);
   }
   // ---- ⛔ Suspensions (only the creator): for any number of days, with a reason the person sees. ----
@@ -1212,7 +1267,55 @@
     if (state.page === "person" && state.person) state.person = await api(`/api/users/${state.person.user.id}`);
     if (state.page === "safety") await loadSafety();
   }
-  const untilText = s => new Date(s.until).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  const untilText = s => new Date(s.until).toLocaleString([], { weekday: "short", month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+  // ---- 🚻 Boy or girl: everyone picks one, then does a face scan (the creator only picks). Until then Yakimma only
+  // shows this page (and the rules). If the scan doesn't agree, or can't tell, the creator decides and they wait. ----
+  const GENDERS = { boy: { icon: "💙", name: "Boy", zone: "Boys" }, girl: { icon: "💗", name: "Girl", zone: "Girls" } };
+  function genderPage() {
+    const waiting = GENDERS[state.user.genderWaiting], signOut = kidOn() ? "" : `<button class="soft" id="logout">🚪 Sign out</button>`;
+    if (waiting) return hero("Waiting for the creator 🚻", "The creator is checking your account. You can use Yakimma as soon as they're done.", "ALMOST THERE") +
+      `<section class="panel"><p>You picked <strong>${waiting.icon} ${waiting.name}</strong>. The face scan couldn't be sure, so the creator will check it for you.</p>` +
+      `<div class="actions"><button class="primary" id="genderCheck">🔄 Check again</button><button class="soft" data-page="rules">📜 Read the rules</button>${signOut}</div></section>`;
+    return hero("Are you a boy or a girl? 🚻", "Boys see posts for boys, girls see posts for girls, and everyone sees posts for both. Friends and chats are for everyone.", "BEFORE YOU START") +
+      `<section class="panel"><h2>Choose one</h2><div class="gender-pick">${Object.entries(GENDERS).map(([g, x]) => `<button class="gender-btn ${g}" data-gender-pick="${g}"><span aria-hidden="true">${x.icon}</span>${x.name}</button>`).join("")}</div>` +
+      `<p class="muted-note">${state.user.creator ? "You're the creator, so there's no face scan for you." : "Next comes a quick face scan to check it. It happens on your device, and the camera picture is never saved or sent."}</p><div class="actions">${signOut}</div></section>`;
+  }
+  // After picking, the face scan (in a pop-up, so the page can change behind it without stopping the camera).
+  async function pickGender(gender) {
+    const x = GENDERS[gender];
+    const done = async (guess, scanned) => {
+      const d = await api("/api/me/gender", send("POST", { gender, guess }));
+      state.user = d.user; closeModal(); await refresh(); render();
+      if (d.user.gender) toast(`Welcome to the ${x.zone} zone! ${x.icon}`);
+      else if (scanned) toast("The face scan couldn't be sure, so the creator will check it. 🚻");
+    };
+    if (state.user.creator) return done(null).catch(err => toast(err.message, true));
+    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="genderTitle"><div class="row between"><h2 id="genderTitle">${x.icon} Face scan</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
+      `<p>You picked <strong>${x.icon} ${x.name}</strong>. Look straight at the camera with your face in the circle.</p><div class="face-box"><video id="faceVideo" playsinline muted></video><div class="face-ring" aria-hidden="true"></div></div>` +
+      `<p class="muted-note" id="faceStatus" role="status">The scan happens on your device. Your camera picture never leaves it and isn't saved.</p>` +
+      `<div class="actions"><button class="primary" id="genderScan">📷 Start the face scan</button><button class="soft" id="genderNoScan">I can't do a face scan</button></div>` +
+      `<p class="muted-note">Can't do one? The creator will check it instead.</p><p class="muted-note error-text" id="genderError" role="alert"></p></section></div>`;
+    const fail = err => { if ($("#genderError")) $("#genderError").textContent = err.message; };
+    $("#closeModal").onclick = closeModal;
+    $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
+    $("#genderNoScan").onclick = () => done(null).catch(fail);
+    $("#genderScan").onclick = async () => {
+      const btn = $("#genderScan");
+      btn.disabled = true; fail({ message: "" });
+      try { await done((await faceScan()).gender, true); }
+      catch (err) {
+        // A closed pop-up stops the scan, and there's nothing left to show the error in.
+        if ($("#genderScan")) { fail(err); btn.disabled = false; btn.textContent = "📷 Try again"; }
+      }
+    };
+  }
+  // On the feed: which zone you're in.
+  function zoneBanner() {
+    if (!state.user?.gender) return "";
+    if (state.user.creator) return `<p class="zone-banner all">👑 You're the creator, so you see every post: 💙 Boys, 💗 Girls and 💜 Both.</p>`;
+    const x = GENDERS[state.user.gender];
+    return `<p class="zone-banner ${state.user.gender}s">${x.icon} You're in the <strong>${x.zone} zone</strong>: you see posts for ${x.zone.toLowerCase()} and posts for both.</p>`;
+  }
   function suspendedPage() {
     const s = state.user.suspended;
     return hero("Your account is suspended ⛔", "The creator suspended your account because something broke Yakimma's rules.", "SUSPENDED") +
@@ -1222,16 +1325,17 @@
   }
   // ---- 🛡️ Safety (only the creator): every chat, comment and private or unlisted post, newest first. ----
   // state.safety: { tab, user, data } — user is a username to show only what that person was part of.
-  const SAFETY_TABS = [["chats", "💬 Chats"], ["comments", "💭 Comments"], ["posts", "🔒 Private posts"], ["suspended", "⛔ Suspended"]];
+  const SAFETY_TABS = [["chats", "💬 Chats"], ["comments", "💭 Comments"], ["posts", "🔒 Private posts"], ["suspended", "⛔ Suspended"], ["genders", "🚻 Gender checks"]];
+  const WHOLE_LIST_TABS = ["suspended", "genders"];
   async function loadSafety() {
     const v = state.safety ||= { tab: "chats", user: "" };
-    v.data = await api(`/api/safety/${v.tab}${v.user && v.tab !== "suspended" ? `?user=${encodeURIComponent(v.user)}` : ""}`);
+    v.data = await api(`/api/safety/${v.tab}${v.user && !WHOLE_LIST_TABS.includes(v.tab) ? `?user=${encodeURIComponent(v.user)}` : ""}`);
   }
   function safetyPage() {
     const v = state.safety || { tab: "chats", user: "" }, d = v.data;
     const top = hero("Safety 🛡️", "Only you can see this page. Every chat, comment and private post on Yakimma, newest first, so you can keep everyone safe.", "CREATOR ONLY");
     const tabs = `<div class="tabs" role="tablist">${SAFETY_TABS.map(([id, label]) => `<button class="step ${v.tab === id ? "on" : ""}" data-safety-tab="${id}" role="tab" aria-selected="${v.tab === id}">${label}</button>`).join("")}</div>`;
-    const filter = v.tab === "suspended" ? "" : `<form id="safetyFilter" class="row nowrap"><label class="sr-only" for="safetyUser">Only show one person</label><input id="safetyUser" maxlength="20" placeholder="Only show one person: type their username" autocomplete="off" value="${safe(v.user)}"><button class="primary" type="submit">Show</button>${v.user ? `<button class="soft" type="button" id="safetyClear">Show everyone</button>` : ""}</form>`;
+    const filter = WHOLE_LIST_TABS.includes(v.tab) ? "" : `<form id="safetyFilter" class="row nowrap"><label class="sr-only" for="safetyUser">Only show one person</label><input id="safetyUser" maxlength="20" placeholder="Only show one person: type their username" autocomplete="off" value="${safe(v.user)}"><button class="primary" type="submit">Show</button>${v.user ? `<button class="soft" type="button" id="safetyClear">Show everyone</button>` : ""}</form>`;
     const who = u => personLink(u.id, u.username, `${avatarHTML(u.avatar, "tiny")}<strong>${nameHTML(u.username)}</strong>`);
     const when = t => `<small class="muted">${timeLabel(t)}</small>`;
     let body = `<p class="muted">Loading…</p>`;
@@ -1241,6 +1345,11 @@
       `<p>${richText(c.body)}</p><small class="muted">On the post “${safe(c.post.caption)}”${c.post.visibility !== "public" ? ` (${c.post.visibility})` : ""}${c.post.groupKey ? " in a group" : ""}</small><div class="comment-tools"><button class="link-btn" data-safety-comment-delete="${c.id}">🗑️ Delete</button></div></div></div>`).join("") || `<p class="muted">No comments.</p>`;
     if (d && v.tab === "posts") body = d.posts.length ? `<div class="feed">${d.posts.map(postCard).join("")}</div>` : `<p class="muted">No private or unlisted posts.</p>`;
     if (d && v.tab === "suspended") body = d.users.map(u => `<div class="safety-row">${who(u)}<span class="row"><small>Until ${safe(untilText(u.suspended))}${u.suspended.reason ? ` · ${safe(u.suspended.reason)}` : ""}</small><button class="soft" data-unsuspend="${u.id}" data-name="${safe(u.username)}">Lift the suspension</button></span></div>`).join("") || `<p class="muted">Nobody is suspended. 🎉</p>`;
+    // Someone whose face scan didn't agree with what they picked (or couldn't tell). They wait until you choose.
+    const guess = g => g ? `the face scan guessed ${GENDERS[g].icon} ${GENDERS[g].name}` : "the face scan couldn't tell, or they couldn't do one";
+    if (d && v.tab === "genders") body = `<p class="muted-note">These people are waiting. Choose Boy or Girl for each one, and they can use Yakimma straight away.</p>` +
+      (d.users.map(u => `<div class="safety-row">${who(u)}<span class="row"><small>Picked ${GENDERS[u.wanted].icon} ${GENDERS[u.wanted].name}, but ${guess(u.guess)}</small>` +
+        Object.entries(GENDERS).map(([g, x]) => `<button class="soft gender-small ${g}" data-set-gender="${u.id}" data-gender="${g}" data-name="${safe(u.username)}">${x.icon} ${x.name}</button>`).join("") + `</span></div>`).join("") || `<p class="muted">Nobody is waiting. 🎉</p>`);
     return top + `<section class="panel">${tabs}${filter}<div class="safety-list">${body}</div></section>`;
   }
   // Reading a chat on the Safety page, without being in it. Nobody can tell it was read.
@@ -1266,7 +1375,7 @@
       `<div class="comment-head">${personLink(m.userId, m.username, `<strong>${nameHTML(m.username)}</strong>`)}<small>${timeLabel(m.createdAt)}</small></div><p>${richText(m.body)}</p>` +
       `<div class="comment-tools">${m.reactions.map(r => reaction(m, r)).join("")}${state.user ? `<button class="link-btn" data-comment-pick="${m.id}" data-post-of="${p.id}">😊 React</button>` +
         `<button class="link-btn" data-comment-reply="${top.id}" data-post-of="${p.id}" ${m === top ? "" : `data-tag="${safe(m.username)}"`}>↩️ Reply</button>` : ""}` +
-      `${m.canDelete ? `<button class="link-btn" data-comment-delete="${m.id}" data-post-of="${p.id}">🗑️ Delete</button>` : ""}${state.user && m.userId !== state.user.id ? `<button class="link-btn" data-comment-report="${m.id}">🚩 Report</button>` : ""}</div></div></div>`;
+      `${m.canDelete ? `<button class="link-btn" data-comment-delete="${m.id}" data-post-of="${p.id}">🗑️ Delete</button>` : ""}${state.user && m.userId !== state.user.id && !isCreatorName(m.username) ? `<button class="link-btn" data-comment-report="${m.id}">🚩 Report</button>` : ""}</div></div></div>`;
     const replyBox = top => c.replyTo === top.id ? `<form class="comment-form reply-form row nowrap" data-comment-form="${p.id}" data-reply-to="${top.id}"><input aria-label="Reply to ${safe(nameText(top.username))}" maxlength="500" placeholder="Reply to ${safe(nameText(top.username))}…" autocomplete="off" value="${safe(c.replyDraft || "")}">` +
       `<button class="primary" type="submit">Reply</button><button class="soft" type="button" data-reply-cancel="${p.id}">Cancel</button></form>` : "";
     const thread = top => `<div class="thread">${item(top, top)}${top.replies.length || c.replyTo === top.id ? `<div class="replies">${top.replies.map(r => item(r, top)).join("")}${replyBox(top)}</div>` : ""}</div>`;
@@ -1295,8 +1404,8 @@
     const code = p.code && !p.inGroup ? `<p class="post-code">🔗 Code <code>${safe(p.code)}</code></p>` : "";
     // Tapping who posted it opens their profile (yours opens your Profile page). Guests can't open profiles.
     const author = !state.user ? `<span class="post-author">${who}</span>` : `<button class="post-author" ${mine ? `data-page="profile"` : `data-view-person="${p.userId}"`} title="See ${safe(nameText(p.username))}'s profile">${who}</button>`;
-    const badge = p.visibility && p.visibility !== "public" ? ` <span class="pill">${VISIBILITY.find(v => v[0] === p.visibility)[1]}</span>` : "";
-    return `<article class="panel post" data-post="${p.id}"><div class="posthead">${author}${badge}${state.user && state.user.id !== p.userId ? `<button class="soft post-block" data-block="${p.userId}" data-name="${safe(p.username)}">🚫 Block</button>` : ""}</div>${postMedia(p)}<p>${richText(p.caption)}</p>${p.description ? `<div class="post-desc clamped">${richText(p.description)}</div>${p.description.length > 150 || p.description.includes("\n") ? `<button class="link-btn" data-desc-toggle="${p.id}">…more</button>` : ""}` : ""}<div class="actions"><button class="soft" data-like="${p.id}" ${!state.user || state.user.id===p.userId?"disabled":""}>${p.liked?"💗 Liked":"🤍 Like"} · ${p.likes}</button><button class="soft" data-comments="${p.id}" aria-expanded="${Boolean(state.comments?.[p.id]?.open)}">💬 Comment · ${p.comments ?? 0}</button>${state.user ? `<button class="soft" data-playlist="${p.id}" aria-pressed="${p.inPlaylist}">${p.inPlaylist ? "✓ In playlist" : "➕ Playlist"}</button>` : ""}${video ? viewerTool("speed", "⏩", "Speed", p.id) + viewerTool("effects", "✨", "Effects", p.id) : ""}${postTools(p)}</div><div class="viewer">${video ? viewerPanel(p.id) : ""}</div>${commentsHTML(p)}${code}</article>`;
+    const badge = (p.visibility && p.visibility !== "public" ? ` <span class="pill">${VISIBILITY.find(v => v[0] === p.visibility)[1]}</span>` : "") + (p.inGroup ? "" : audiencePill(p));
+    return `<article class="panel post" data-post="${p.id}"><div class="posthead">${author}${badge}${state.user && state.user.id !== p.userId && !isCreatorName(p.username) ? `<button class="soft post-block" data-block="${p.userId}" data-name="${safe(p.username)}">🚫 Block</button>` : ""}</div>${postMedia(p)}<p>${richText(p.caption)}</p>${p.description ? `<div class="post-desc clamped">${richText(p.description)}</div>${p.description.length > 150 || p.description.includes("\n") ? `<button class="link-btn" data-desc-toggle="${p.id}">…more</button>` : ""}` : ""}<div class="actions"><button class="soft" data-like="${p.id}" ${!state.user || state.user.id===p.userId?"disabled":""}>${p.liked?"💗 Liked":"🤍 Like"} · ${p.likes}</button><button class="soft" data-comments="${p.id}" aria-expanded="${Boolean(state.comments?.[p.id]?.open)}">💬 Comment · ${p.comments ?? 0}</button>${state.user ? `<button class="soft" data-playlist="${p.id}" aria-pressed="${p.inPlaylist}">${p.inPlaylist ? "✓ In playlist" : "➕ Playlist"}</button>` : ""}${video ? viewerTool("speed", "⏩", "Speed", p.id) + viewerTool("effects", "✨", "Effects", p.id) : ""}${postTools(p)}</div><div class="viewer">${video ? viewerPanel(p.id) : ""}</div>${commentsHTML(p)}${code}</article>`;
   }
   function render() {
     applyTheme();
@@ -1314,16 +1423,19 @@
     let html = "";
     if (state.user?.suspended && !state.user.creator && state.page !== "rules") {
       html = suspendedPage();
+    } else if (state.user && !state.user.gender && state.page !== "rules") {
+      html = genderPage();
     } else if (state.page === "feed") {
       html = `<p class="home-name">Mahdiya Faiza Manha</p><p class="home-email">Email me: <a href="mailto:manharuwycse@gmail.com">manharuwycse@gmail.com</a></p>` +
       hero("The world you can show off", "Upload videos you already made, watch posts, and earn 10 MC when someone likes your post.", "WELCOME TO YAKIMMA") +
-      `<section class="panel"><div class="row between"><div><h2>Welcome to your feed 🌸</h2><small>Be kind, be creative, and show off your style.</small></div><button class="primary" data-page="create">＋ Upload post</button></div></section>` +
+      `<section class="panel"><div class="row between"><div><h2>Welcome to your feed 🌸</h2><small>Be kind, be creative, and show off your style.</small></div><button class="primary" data-page="create">＋ Upload post</button></div></section>` + zoneBanner() +
       `<div class="feed">${state.posts.map(postCard).join("") || `<div class="panel empty">No posts yet. Sign in and share the first one! 🌸</div>`}</div>`;
     } else if (state.page === "create") {
       html = hero("Upload your moment", "Choose a video you already made or a photo. Yakimma does not record videos inside the website.", "CREATE A POST") +
       `<section class="panel"><h2>Make a post</h2>${!state.user?`<p>Please sign in before posting.</p><button class="primary" id="openAuth">Sign in / Create account</button>`:`<form id="postForm"><label for="postType">Post type</label><select id="postType"><option value="video">Video</option><option value="photo">Photo</option><option value="text">Text only</option></select><label for="media">Choose an existing photo or video</label><input id="media" name="media" type="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,video/quicktime"><small>Maximum 100 MB per file in this starter. Uploads are stored on the server running this app.</small><fieldset class="thumb-box" id="thumbBox" hidden><legend>🖼️ Thumbnail</legend><p class="muted-note">This picture shows on your video before it plays. We picked a moment for you. Change it if you like.</p>${thumbPickerHTML()}</fieldset><label for="caption">Caption</label><textarea id="caption" maxlength="240" rows="3" required placeholder="Write something fun..."></textarea>` +
         `<label for="description">Description <small>(optional)</small></label><textarea id="description" maxlength="2000" rows="5" placeholder="Tell people more about your post"></textarea>` +
         `<fieldset class="visibility"><legend>Who can see it?</legend>${VISIBILITY.map(([id, label, about], i) => `<label class="vis-option"><input type="radio" name="visibility" value="${id}" ${i ? "" : "checked"}><span><strong>${label}</strong><small>${about}</small></span></label>`).join("")}</fieldset>` +
+        `<fieldset class="visibility"><legend>Who is it for? <small>(you have to choose)</small></legend>${AUDIENCE.map(([id, label, about]) => `<label class="vis-option"><input type="radio" name="audience" value="${id}" required><span><strong>${label}</strong><small>${about}</small></span></label>`).join("")}</fieldset>` +
         `<div class="actions"><button class="primary" type="submit">Publish post ✨</button><button class="soft" type="button" data-page="feed">Cancel</button></div></form>`}</section>`;
     } else if (state.page === "shop") {
       html = hero("The Yakimma Shop", "Your exact shop prices, paid with MeowCoin and LoveCards.", "SHOP & COLLECT") +
@@ -1338,7 +1450,7 @@
       html = nailsPage();
     } else if (state.page === "profile") {
       html = hero("Your Yakimma profile", "Your posts, wallet, and collection.", "MY PROFILE") +
-      `<section class="panel"><div class="posthead">${state.user?`<button class="avatar-edit" id="editAvatar" aria-label="Change profile picture">${avatarHTML(state.user.avatar,"big")}<span class="avatar-edit-badge" aria-hidden="true">✏️</span></button>`:avatarHTML(null,"big")}<div><h2 style="margin:0">${state.user?nameHTML(state.user.username):"Guest"}</h2><small>${state.user?`🔢 Account number ${state.user.accountNumber}`:"Browsing as a guest"}</small></div></div>${state.user?`<div class="row"><span class="pill">🐱 ${state.user.mc} MC</span><span class="pill">💌 ${state.user.lc} LC</span><span class="pill">🎁 ${state.inventory.length} items</span><span class="pill">👯 ${state.social.friends.length} friend${state.social.friends.length===1?"":"s"}</span>${identityPills(state.user)}${followPills(state.user.id, state.social.follows?.followers ?? 0, state.social.follows?.following ?? 0, state.user.username)}</div>${assistantLines(state.user, true)}<div class="actions"><button class="soft" id="editAvatarBtn">🎨 Change picture</button><button class="soft" id="changeUsername">✏️ Change Username</button>${state.user.admin?`<button class="soft" id="changeDisplayName">🪪 Display name</button>`:""}<button class="danger" id="logout">Sign out</button></div>`:`<button class="primary" id="openAuth">Create account / Sign in</button>`}</section><section class="panel"><h3>My collection</h3>${state.inventory.length?[...state.products.filter(p=>state.inventory.includes(p.id)).map(p=>`${p.icon} ${safe(p.name)}`),...state.nailOptions.arts.filter(a=>a.item&&state.inventory.includes(a.item)).map(a=>`${a.icon} ${safe(a.name)} sticker`),...state.themes.filter(t=>t.gift&&state.inventory.includes(t.item)).map(t=>`${t.icon} ${safe(t.name)} theme`)].map(x=>`<span class="pill">${x}</span> `).join(""):`<p class="muted">Visit the shop to collect something cute.</p>`}</section>` +
+      `<section class="panel"><div class="posthead">${state.user?`<button class="avatar-edit" data-view-avatar="me" aria-label="See your profile picture">${avatarHTML(state.user.avatar,"big")}<span class="avatar-edit-badge" aria-hidden="true">🔍</span></button>`:avatarHTML(null,"big")}<div><h2 style="margin:0">${state.user?nameHTML(state.user.username):"Guest"}</h2><small>${state.user?`🔢 Account number ${state.user.accountNumber}`:"Browsing as a guest"}</small></div></div>${state.user?`<div class="row"><span class="pill">🐱 ${state.user.mc} MC</span><span class="pill">💌 ${state.user.lc} LC</span><span class="pill">🎁 ${state.inventory.length} items</span><span class="pill">👯 ${state.social.friends.length} friend${state.social.friends.length===1?"":"s"}</span>${identityPills(state.user)}${followPills(state.user.id, state.social.follows?.followers ?? 0, state.social.follows?.following ?? 0, state.user.username)}</div>${assistantLines(state.user, true)}<div class="actions"><button class="soft" id="editAvatarBtn">🎨 Change picture</button><button class="soft" id="changeUsername">✏️ Change Username</button>${state.user.admin?`<button class="soft" id="changeDisplayName">🪪 Display name</button>`:""}<button class="soft" id="emailBtn">📧 Email</button><button class="danger" id="logout">Sign out</button></div>`:`<button class="primary" id="openAuth">Create account / Sign in</button>`}</section>${state.user?`<section class="panel"><h3>📲 Quick sign in</h3><p class="muted-note">Signing in on a new device? Tap <strong>📲 Quick sign in</strong> on it, then type the code it shows here and press <strong>✅ Confirm</strong>.</p><form class="quick-confirm" id="quickConfirmForm"><input id="quickConfirmCode" maxlength="9" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="Code from new device" aria-label="Quick sign-in code from your new device"><button class="soft" type="submit">✅ Confirm</button></form></section>`:""}<section class="panel"><h3>My collection</h3>${state.inventory.length?[...state.products.filter(p=>state.inventory.includes(p.id)).map(p=>`${p.icon} ${safe(p.name)}`),...state.nailOptions.arts.filter(a=>a.item&&state.inventory.includes(a.item)).map(a=>`${a.icon} ${safe(a.name)} sticker`),...state.themes.filter(t=>t.gift&&state.inventory.includes(t.item)).map(t=>`${t.icon} ${safe(t.name)} theme`)].map(x=>`<span class="pill">${x}</span> `).join(""):`<p class="muted">Visit the shop to collect something cute.</p>`}</section>` +
       (state.user ? `<section class="panel"><h3>My nails 💅</h3>${receivedGallery(3)}</section>` + playlistSection() + myPostsSection() : "");
     } else if (state.page === "pictures") {
       html = picturesPage();
@@ -1634,7 +1746,7 @@
     ["📸", "Only post what's yours", "Post photos and videos you made, or that you're allowed to share."],
     ["📢", "No spam", "Don't post the same thing again and again, or beg people for likes or MC."],
     ["🚩", "Report it, don't fight it", "If you see something bad, tap 🚩 Report and the admins will look at it."],
-    ["🤥", "False reporting can cause suspensions", "Be careful! Lying is bad!"],
+    ["🤥", "False reporting can cause suspensions", "Be careful! Lying is bad!", "It can cause a suspension."],
     ["🛠️", "The admins keep Yakimma safe", "They can delete posts, comments, messages and groups that break the rules."]
   ];
   function rulesPage() {
@@ -1679,6 +1791,7 @@
   }
   // The face scan's library (with its models) is only downloaded when someone starts a scan.
   let faceLib = null, faceStream = null;
+  const FACE_SURE = 0.75;
   const loadFaceLib = () => faceLib ||= new Promise((resolve, reject) => {
     const s = document.createElement("script");
     s.src = "/vendor/face-api.js";
@@ -1697,6 +1810,7 @@
   }).catch(() => { faceRecLib = null; throw new Error("The face scan couldn't start. Check your connection and try again."); });
   const stopCamera = () => { faceStream?.getTracks().forEach(t => t.stop()); faceStream = null; };
   // Looks for your face a few times a second and keeps 10 guesses of your age. The middle guess is the answer.
+  // It also gives `gender`: "boy" or "girl" when the 10 looks mostly agree (FACE_SURE), or null when it can't tell.
   // With `recognize`, it also gives `face`: 128 numbers that describe the face, averaged over the 10 looks.
   async function faceScan(recognize = false) {
     const say = text => { const el = $("#faceStatus"); if (!el) throw new Error("closed"); el.textContent = text; };
@@ -1709,19 +1823,20 @@
       video.srcObject = faceStream;
       await video.play();
       say("Getting the face scan ready…");
-      const faceapi = await (recognize ? loadFaceRecognition() : loadFaceLib()), options = new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 }), ages = [], looks = [];
+      const faceapi = await (recognize ? loadFaceRecognition() : loadFaceLib()), options = new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 }), ages = [], looks = [], boyish = [];
       for (let tries = 0; ages.length < 10 && tries < 100; tries++) {
         if (!$("#faceVideo")) throw new Error("closed");
         const found = faceapi.detectSingleFace(video, options);
         const face = await (recognize ? found.withFaceLandmarks().withAgeAndGender().withFaceDescriptor() : found.withAgeAndGender());
-        if (face) { ages.push(face.age); if (recognize) looks.push(face.descriptor); }
+        if (face) { ages.push(face.age); boyish.push(face.gender === "male" ? face.genderProbability : 1 - face.genderProbability); if (recognize) looks.push(face.descriptor); }
         say(face ? `Scanning… ${ages.length * 10}%` : "Can't see your face. Look straight at the camera, somewhere bright.");
         await new Promise(r => setTimeout(r, 150));
       }
       if (ages.length < 10) throw new Error("The face scan couldn't see your face well enough. Try again somewhere brighter.");
       say("Done!");
       const face = recognize ? Array.from(looks[0], (_, i) => looks.reduce((sum, look) => sum + look[i], 0) / looks.length) : null;
-      return { age: ages.sort((a, b) => a - b)[ages.length >> 1], face };
+      const boy = boyish.reduce((sum, b) => sum + b, 0) / boyish.length;
+      return { age: ages.sort((a, b) => a - b)[ages.length >> 1], face, gender: boy >= FACE_SURE ? "boy" : boy <= 1 - FACE_SURE ? "girl" : null };
     } finally { stopCamera(); }
   }
 
@@ -2381,7 +2496,8 @@
     `<label for="country">Country</label><select id="country" required><option value="">Choose your country</option>` +
     (state.countries || []).map(c => `<option value="${c.code}">${c.flag} ${safe(c.name)}</option>`).join("") + `</select>` +
     `<p class="muted-note">🌍 Everyone can see your religion and country on your profile.</p>`;
-  const identityPills = u => [state.countries?.find(c => c.code === u.country), state.religions?.find(r => r.id === u.religion)]
+  const identityPills = u => (u.gender ? `<span class="pill aud ${u.gender}s" title="${GENDERS[u.gender].name}">${GENDERS[u.gender].icon}<span class="thing-label"> ${GENDERS[u.gender].name}</span></span>` : "") +
+    [state.countries?.find(c => c.code === u.country), state.religions?.find(r => r.id === u.religion)]
     .filter(Boolean).map(x => `<span class="pill" title="${safe(x.name)}">${x.flag || x.icon}<span class="thing-label"> ${safe(x.name)}</span></span>`).join("");
   // Accounts made before religion and country were asked for choose them once. The pop-up can't be closed until they do.
   function identityModal() {
@@ -2400,7 +2516,7 @@
   }
   function openAuth(startMode = "login") {
     $("#accountMenu")?.remove();
-    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="authTitle"><div class="row between"><h2 id="authTitle">🌸 Welcome to Yakimma</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div><div class="row"><button type="button" id="tabLogin">Sign in</button><button type="button" id="tabSignup">Create account</button></div><form id="authForm"><label for="username">Username</label><input id="username" name="username" minlength="3" maxlength="20" autocomplete="username" required aria-describedby="usernameRules"><div class="notice error rules" id="usernameRules" role="note">⚠️ Do not copy usernames<br>⚠️ Do not use symbols<br>⚠️ Do not use spaces</div><label for="password" id="passwordLabel">Password</label><input id="password" name="password" type="password" maxlength="200" required aria-describedby="passwordRules"><div class="notice error rules" id="passwordRules" role="note">⚠️ Do not use spaces</div><div id="signupIdentity">${identityFields()}</div><p id="authError" class="muted-note"></p><button class="primary" type="submit" style="width:100%">Sign in</button></form></section></div>`;
+    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="authTitle"><div class="row between"><h2 id="authTitle">🌸 Welcome to Yakimma</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div><div class="row"><button type="button" id="tabLogin">Sign in</button><button type="button" id="tabSignup">Create account</button></div><form id="authForm"><label for="username">Username</label><input id="username" name="username" minlength="3" maxlength="20" autocomplete="username" required aria-describedby="usernameRules"><div class="notice error rules" id="usernameRules" role="note">⚠️ Do not copy usernames<br>⚠️ Do not use symbols<br>⚠️ Do not use spaces</div><label for="password" id="passwordLabel">Password</label><input id="password" name="password" type="password" maxlength="200" required aria-describedby="passwordRules"><div class="notice error rules" id="passwordRules" role="note">⚠️ Do not use spaces</div><div id="signupIdentity">${identityFields()}</div><p id="authError" class="muted-note"></p><button class="primary" type="submit" style="width:100%">Sign in</button></form><div id="otherSignIn" class="other-signin"><p class="muted-note">Don't know your password?</p><div class="actions"><button type="button" class="soft" id="googleWay">📧 Email + Google</button><button type="button" class="soft" id="quickWay">📲 Quick sign in</button></div></div></section></div>`;
     let mode = startMode;
     const setMode = m => {
       mode = m;
@@ -2412,6 +2528,7 @@
       $("#password").minLength = signup ? 8 : 1;
       // The rules only apply to new accounts, so older accounts with other characters or spaces can still sign in.
       $("#usernameRules").hidden = $("#passwordRules").hidden = $("#signupIdentity").hidden = !signup;
+      $("#otherSignIn").hidden = signup;
       // Religion and country are only for new accounts. Turned off, they don't stop signing in.
       for (const el of $("#signupIdentity").querySelectorAll("select")) el.disabled = !signup;
       if (signup) {
@@ -2424,6 +2541,7 @@
     };
     setMode(mode);
     $("#tabSignup").onclick = () => setMode("signup"); $("#tabLogin").onclick = () => setMode("login");
+    $("#googleWay").onclick = googleSignInModal; $("#quickWay").onclick = quickSignInModal;
     $("#closeModal").onclick = closeModal;
     $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
     $("#authForm").onsubmit = async e => {
@@ -2439,6 +2557,145 @@
       catch (err) { $("#authError").textContent = err.message; $("#authError").className = "notice error"; }
     };
     $("#username").focus();
+  }
+  // Pop-ups that go back to the sign-in box: a title, what's in them, and a ← Back button (id authBack) somewhere inside.
+  function signInStep(title, body) {
+    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="stepTitle"><div class="row between"><h2 id="stepTitle">${title}</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>${body}</section></div>`;
+    $("#closeModal").onclick = closeModal;
+    $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
+    $("#authBack").onclick = () => openAuth("login");
+  }
+  // Don't know your password: type the email on your account, then sign in to Google with it. Google sends you back to
+  // Yakimma, and SIGNIN_NOTES says how it went.
+  function googleSignInModal() {
+    signInStep("📧 Sign in with Google", `<p>Type the email on your Yakimma account, then sign in to Google with that email.</p>` +
+      (state.googleSignIn ? "" : `<p class="notice error">Sign in with Google isn't set up on Yakimma yet.</p>`) +
+      `<form id="googleForm"><label for="googleEmail">Email</label><input id="googleEmail" type="email" autocomplete="email" maxlength="254" required>` +
+      `<div class="actions"><button class="primary" type="submit" ${state.googleSignIn ? "" : "disabled"}>Sign in with Google</button><button class="soft" type="button" id="authBack">← Back</button></div></form>` +
+      `<p class="muted-note">This only works if you added your email with 📧 Email on your Profile before.</p>`);
+    $("#googleForm").onsubmit = e => { e.preventDefault(); location.href = `/api/auth/google?email=${encodeURIComponent($("#googleEmail").value.trim())}`; };
+    $("#googleEmail").focus();
+  }
+  // What the page says after coming back from Google (/?signin=...).
+  const SIGNIN_NOTES = {
+    "google": null,
+    "google-off": "Sign in with Google isn't set up on Yakimma yet.",
+    "google-cancelled": "Signing in with Google was stopped, so you're not signed in.",
+    "google-failed": "Signing in with Google didn't work. Please try again.",
+    "google-unverified": "Google hasn't checked that email belongs to you, so it can't sign you in.",
+    "google-nomatch": "No Yakimma account has that Google email. Sign in with your password, then add your email with 📧 Email on your Profile.",
+    "suspended": "That account is suspended, so it can't sign in right now."
+  };
+  // Quick sign-in: this device shows a code, and you confirm it on a device that's already signed in. This device checks
+  // every 2 seconds until it's confirmed (or the pop-up is closed).
+  let quickTimer = null;
+  function quickSignInModal() {
+    signInStep("📲 Quick sign in", `<p>On a device where you're already signed in, open <strong>🌷 Profile</strong>, type this code in the <strong>📲 Quick sign in</strong> box above My collection, and press <strong>✅ Confirm</strong>.</p>` +
+      `<p class="quick-signin-code" id="quickCodeShown" aria-live="polite">…</p><p class="muted-note" id="quickStatus" role="status">Getting your code…</p>` +
+      `<div class="actions"><button class="soft" type="button" id="quickNew">🔄 New code</button><button class="soft" type="button" id="authBack">← Back</button></div>`);
+    const status = (text, error = false) => { if ($("#quickStatus")) Object.assign($("#quickStatus"), { textContent: text, className: error ? "notice error" : "muted-note" }); };
+    const stop = () => { clearInterval(quickTimer); quickTimer = null; };
+    const check = async () => {
+      if (!$("#quickCodeShown")) return stop();
+      try {
+        const d = await api("/api/quick-signin");
+        if (d.expired) { stop(); status("That code ran out. Tap 🔄 New code for another one.", true); return; }
+        if (!d.user) return;
+        stop(); closeModal(); await refresh(); await loadPageData();
+        toast(`Welcome back, ${state.user.username}! 🩵`);
+      } catch (err) { stop(); status(err.message, true); }
+    };
+    const start = async () => {
+      stop();
+      try {
+        const d = await api("/api/quick-signin", { method: "POST" });
+        if (!$("#quickCodeShown")) return;
+        $("#quickCodeShown").textContent = `${d.code.slice(0, 4)}-${d.code.slice(4)}`;
+        status(`Waiting for you to confirm it on your other device… The code works for ${d.minutes} minutes.`);
+        quickTimer = setInterval(check, 2000);
+      } catch (err) { status(err.message, true); }
+    };
+    $("#quickNew").onclick = start;
+    start();
+  }
+  // Your email, for signing in with Google: type it, then the code sent to it.
+  function emailModal(step = "email", info = {}) {
+    const has = state.user.email;
+    const body = step === "email"
+      ? `<p>${has ? `The email on your account is <strong>${safe(has)}</strong>. Type a new one to change it.` : "Add your email, and if you ever don't know your password you can sign in with Google using it."} Nobody else sees it.</p>` +
+        `<form id="emailForm"><label for="emailInput">Email</label><input id="emailInput" type="email" autocomplete="email" maxlength="254" required><div class="actions"><button class="primary" type="submit">Send my code</button></div></form>`
+      : `<p>${info.testCode ? `Email isn't set up on this computer, so here's your code instead: <strong class="code-tag">${safe(info.testCode)}</strong>` : `We sent a code to <strong>${safe(info.email)}</strong>. It works for 10 minutes.`}</p>` +
+        `<form id="emailCodeForm"><label for="emailCode">6-digit code</label><input id="emailCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required><div class="actions"><button class="primary" type="submit">Check my code</button><button class="soft" type="button" id="emailBack">Use another email</button></div></form>`;
+    $("#modalroot").innerHTML = `<div class="modalback" id="modalback"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="emailTitle"><div class="row between"><h2 id="emailTitle">📧 Your email</h2><button class="soft" id="closeModal" aria-label="Close">✕</button></div>` +
+      `${body}<p class="muted-note error-text" id="emailError" role="alert"></p></section></div>`;
+    const fail = err => { if ($("#emailError")) $("#emailError").textContent = err.message; };
+    $("#closeModal").onclick = closeModal;
+    $("#modalback").onclick = e => { if (e.target.id === "modalback") closeModal(); };
+    if (step === "email") {
+      $("#emailForm").onsubmit = async e => {
+        e.preventDefault();
+        // The button waits while the email is sent, so pressing it again can't send a second code.
+        const email = $("#emailInput").value.trim(), btn = $("#emailForm [type=submit]");
+        btn.disabled = true; btn.textContent = "Sending…";
+        try { const d = await api("/api/me/email", send("POST", { email })); emailModal("code", { email, testCode: d.testCode }); }
+        catch (err) { fail(err); btn.disabled = false; btn.textContent = "Send my code"; }
+      };
+      $("#emailInput").focus();
+      return;
+    }
+    $("#emailBack").onclick = () => emailModal("email");
+    $("#emailCodeForm").onsubmit = async e => {
+      e.preventDefault();
+      try {
+        const d = await api("/api/me/email/code", send("POST", { code: $("#emailCode").value }));
+        state.user = d.user; closeModal(); toast(`Your email ${d.user.email} is saved. 📧 You can sign in with Google using it.`);
+      } catch (err) { fail(err); }
+    };
+    $("#emailCode").focus();
+  }
+  // ---- 🔍 Tapping the big profile picture on a profile shows it on 70% of the screen. Zoom in or out with + and −,
+  // the mouse wheel or by pinching, and drag it around once it's zoomed in. Your own has 🎨 Change picture too. ----
+  const ZOOM_MIN = 0.5, ZOOM_MAX = 4, ZOOM_STEP = 1.25;
+  function avatarViewer(avatar, username, mine = false) {
+    const whose = mine ? "Your" : `${nameText(username)}'s`;
+    $("#modalroot").innerHTML = `<div class="modalback avatar-viewer" id="modalback"><section class="avatar-view" role="dialog" aria-modal="true" aria-label="${safe(whose)} profile picture">` +
+      `<div class="avatar-stage" id="avatarStage">${avatarHTML(avatar, "full")}</div><div class="zoom-bar"><button class="soft zoom-step" id="zoomOut" aria-label="Zoom out">−</button>` +
+      `<button class="soft" id="zoomReset" aria-label="Back to normal size">100%</button><button class="soft zoom-step" id="zoomIn" aria-label="Zoom in">+</button>` +
+      `${mine ? `<button class="soft" id="viewerChange">🎨 Change picture</button>` : ""}<button class="soft" id="closeModal" aria-label="Close">✕</button></div></section></div>`;
+    const stage = $("#avatarStage"), pic = stage.firstElementChild, fingers = new Map();
+    let zoom = 1, x = 0, y = 0, pinch = null, dragged = false;
+    const draw = () => {
+      // Zoomed in, it can be dragged until its edge reaches the middle of the screen. At normal size or smaller it stays in the middle.
+      const room = zoom > 1 ? pic.offsetWidth * zoom / 2 : 0;
+      x = Math.max(-room, Math.min(room, x)); y = Math.max(-room, Math.min(room, y));
+      pic.style.transform = `translate(${x}px, ${y}px) scale(${zoom})`;
+      $("#zoomReset").textContent = `${Math.round(zoom * 100)}%`;
+      $("#zoomOut").disabled = zoom <= ZOOM_MIN; $("#zoomIn").disabled = zoom >= ZOOM_MAX;
+    };
+    const zoomTo = z => { zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z)); draw(); };
+    const spread = () => { const [a, b] = [...fingers.values()]; return Math.hypot(a.x - b.x, a.y - b.y) || 1; };
+    $("#zoomIn").onclick = () => zoomTo(zoom * ZOOM_STEP);
+    $("#zoomOut").onclick = () => zoomTo(zoom / ZOOM_STEP);
+    $("#zoomReset").onclick = () => { x = y = 0; zoomTo(1); };
+    $("#closeModal").onclick = closeModal;
+    if (mine) $("#viewerChange").onclick = openAvatarEditor;
+    // Tapping the dark part around it closes it, unless you were just dragging the picture.
+    $("#modalback").onclick = e => { if (e.target.id === "modalback" && !dragged) closeModal(); dragged = false; };
+    stage.onwheel = e => { e.preventDefault(); zoomTo(zoom * Math.exp(-e.deltaY / (e.ctrlKey ? 100 : 300))); };
+    stage.onpointerdown = e => {
+      stage.setPointerCapture(e.pointerId); fingers.set(e.pointerId, { x: e.clientX, y: e.clientY }); dragged = false;
+      if (fingers.size === 2) pinch = { spread: spread(), zoom };
+    };
+    stage.onpointermove = e => {
+      const last = fingers.get(e.pointerId);
+      if (!last) return;
+      fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pinch) return zoomTo(pinch.zoom * spread() / pinch.spread);
+      if (zoom <= 1) return;
+      x += e.clientX - last.x; y += e.clientY - last.y; dragged = true; draw();
+    };
+    stage.onpointerup = stage.onpointercancel = e => { fingers.delete(e.pointerId); if (fingers.size < 2) pinch = null; };
+    draw(); $("#zoomIn").focus();
   }
   // Profile picture editor: an emoji avatar, or a photo you drag and zoom to fit the circle.
   function openAvatarEditor() {
@@ -2570,7 +2827,8 @@
       if(b.id==="accountBtn"){state.user?toggleAccountMenu():openAuth("login");return;}
       if(b.id==="openAuth"){openAuth("signup");return;}
       if(b.dataset.signIn!==undefined){openAuth("login");return;}
-      if(["editAvatar","editAvatarBtn","menuAvatar"].includes(b.id)){openAvatarEditor();return;}
+      if(["editAvatarBtn","menuAvatar"].includes(b.id)){openAvatarEditor();return;}
+      if(b.dataset.viewAvatar){const me=b.dataset.viewAvatar==="me",u=me?state.user:state.person.user;avatarViewer(u.avatar,u.username,me);return;}
       if(b.dataset.myOrder){state.myPosts={...state.myPosts,order:b.dataset.myOrder};await loadMyPosts();render();return;}
       if(b.id==="moreMyPosts"){b.disabled=true;await loadMyPosts(true);render();return;}
       if(b.id==="logout"){if(kidOn()&&!state.user.admin)return kidSignOut();await api("/api/logout",{method:"POST"});await signedOut();return;}
@@ -2591,6 +2849,7 @@
       if(b.id==="kidForgot"){kidModal("email",{reset:true});return;}
       if(b.id==="kidFaceBtn"){kidFaceModal();return;}
       if(b.id==="changeUsername"){usernameModal();return;}
+      if(b.id==="emailBtn"){emailModal();return;}
       if(b.id==="changeDisplayName"){displayNameModal();return;}
       if(b.id==="bellBtn"){await toggleBell();return;}
       if(b.dataset.notif){const n=state.notifications?.find(x=>x.id===Number(b.dataset.notif));if(n)await openNotification(n);return;}
@@ -2599,6 +2858,10 @@
       if(b.dataset.commentPick){const id=b.dataset.commentPick,postId=Number(b.dataset.postOf);openEmojiPicker("😊 React to the comment",async emoji=>{try{setComments(postId,await api(`/api/comments/${id}/reactions`,send("POST",{emoji})));}catch(err){toast(err.message,true);}});return;}
       if(b.dataset.commentReport){reportModal(Number(b.dataset.commentReport),"comment");return;}
       if(b.dataset.suspend){suspendModal(Number(b.dataset.suspend),b.dataset.name,b.dataset.reason||"");return;}
+      if(b.dataset.genderPick){await pickGender(b.dataset.genderPick);return;}
+      if(b.id==="genderCheck"){await refresh();render();toast(state.user?.gender?`All done! Welcome to the ${GENDERS[state.user.gender].zone} zone ${GENDERS[state.user.gender].icon}`:"Still waiting for the creator. 🚻");return;}
+      if(b.dataset.setGender){const g=GENDERS[b.dataset.gender];state.safety.data=await api(`/api/users/${b.dataset.setGender}/gender`,send("POST",{gender:b.dataset.gender}));render();toast(`${b.dataset.name} is a ${g.name} ${g.icon}. They can use Yakimma now.`);return;}
+      if(b.dataset.postAudience){audienceModal(Number(b.dataset.postAudience));return;}
       if(b.dataset.unsuspend){if(!confirm(`Lift ${b.dataset.name}'s suspension? They can use Yakimma again straight away.`))return;await api(`/api/users/${b.dataset.unsuspend}/suspend`,{method:"DELETE"});await suspensionsChanged();toast(`${b.dataset.name} can use Yakimma again. ✅`);return;}
       if(b.dataset.keepComment){state.reports=await api(`/api/reports/comments/${b.dataset.keepComment}`,{method:"DELETE"});toast("Kept. The reports on that comment are cleared ✅");return;}
       if(b.dataset.reportCommentDelete){if(!confirm("Delete this comment? Any replies to it go too. This can't be undone."))return;await api(`/api/comments/${b.dataset.reportCommentDelete}`,{method:"DELETE"});state.reports=await api("/api/reports");toast("The comment is deleted. 🗑️");return;}
@@ -2623,6 +2886,7 @@
       if(b.dataset.follow){state.person=await api(`/api/users/${b.dataset.follow}/follow`,{method:"POST"});toast(`You're following ${state.person.user.username}! ➕`);return;}
       if(b.dataset.unfollow){state.person=await api(`/api/users/${b.dataset.unfollow}/follow`,{method:"DELETE"});toast(`You unfollowed ${state.person.user.username}.`);return;}
       if(b.dataset.friendPerson){const name=b.dataset.friendPerson,d=await api("/api/friends/request",send("POST",{username:name}));state.social=d;state.person=await api(`/api/users/${state.person.user.id}`);toast(d.accepted?`You and ${name} are now friends! 🎉`:`Friend request sent to ${name}! 💌`);return;}
+      if(b.dataset.declinePerson){state.social=await api(`/api/friends/requests/${b.dataset.declinePerson}`,{method:"DELETE"});state.person=await api(`/api/users/${state.person.user.id}`);toast("Friend request declined.");return;}
       if(b.dataset.acceptPerson){state.social=await api(`/api/friends/requests/${b.dataset.acceptPerson}/accept`,{method:"POST"});state.person=await api(`/api/users/${state.person.user.id}`);toast("You're now friends! 🎉");return;}
       // The song starts straight away, while this tap still counts as a tap, and is saved after.
       if(b.dataset.song){const before=state.user.song;state.user.song=b.dataset.song;syncMusic();render();try{state.user=(await api("/api/me/song",send("PUT",{song:b.dataset.song}))).user;}catch(err){state.user.song=before;syncMusic();toast(err.message,true);}render();return;}
@@ -2771,6 +3035,16 @@
       catch (err) { btn.disabled = false; toast(err.message, true); }
       return;
     }
+    // Quick sign-in, on the device that's already signed in: confirming the code from a new device signs it in.
+    if(e.target.id==="quickConfirmForm"){
+      e.preventDefault();
+      const code=$("#quickConfirmCode").value.trim();
+      if(!code)return toast("Type the code your new device is showing.",true);
+      if(!confirm(`Sign in to your account (${state.user.username}) on the device showing ${code.toUpperCase()}?\n\nOnly do this if that code is on YOUR OWN device. Whoever has that device can use your account.`))return;
+      try { await api("/api/quick-signin/confirm",send("POST",{code}));$("#quickConfirmCode").value="";toast("Done! ✅ Your new device is signed in to your account."); }
+      catch(err){toast(err.message,true);}
+      return;
+    }
     if(e.target.id==="kidOffForm"){
       e.preventDefault();
       try { const d=await api("/api/kid",send("PUT",{on:false,password:$("#kidOffPass").value}));await zoneChanged(d.user);toast("The kiddy zone is off. Welcome back! 🌸"); }
@@ -2826,8 +3100,9 @@
     if(type==="video" && file && !file.type.startsWith("video/"))return toast("Choose a video file for a video post.",true);
     if(type==="photo" && file && !file.type.startsWith("image/"))return toast("Choose an image file for a photo post.",true);
     if(type!=="text" && !file)return toast("Choose a file, or select Text only.",true);
-    const visibility=$('input[name="visibility"]:checked').value;
-    const body=new FormData();body.append("caption",caption);body.append("description",$("#description").value.trim());body.append("visibility",visibility);if(file)body.append("media",file);
+    const visibility=$('input[name="visibility"]:checked').value, audience=$('input[name="audience"]:checked')?.value;
+    if(!audience)return toast("Choose who it's for first: 💙 Boys, 💗 Girls or 💜 Both.",true);
+    const body=new FormData();body.append("caption",caption);body.append("description",$("#description").value.trim());body.append("visibility",visibility);body.append("audience",audience);if(file)body.append("media",file);
     if(file?.type.startsWith("video/")&&state.createThumb)body.append("thumb",state.createThumb,"thumb.jpg");
     try {
       const d=await api("/api/posts",{method:"POST",body});state.notice="";await refresh();
@@ -2877,7 +3152,14 @@
     // A post's link (/post/<code>, or an older /post/<number>) opens that post.
     const link = location.pathname.match(/^\/post\/([A-Za-z0-9_~-]+)$/);
     if (link) Object.assign(state, { page: "post", postKey: link[1] });
-    try{await refresh();if(link)await loadPageData();render();}catch(err){toast(err.message,true);}
+    // Back from signing in with Google: say how it went, and take ?signin= off the address.
+    const signin = new URLSearchParams(location.search).get("signin");
+    if (signin !== null) history.replaceState(null, "", location.pathname);
+    try{
+      await refresh();if(link)await loadPageData();render();
+      if (signin === "google" && state.user) toast(`Welcome back, ${state.user.username}! 🩵`);
+      else if (Object.hasOwn(SIGNIN_NOTES, signin) && SIGNIN_NOTES[signin]) toast(SIGNIN_NOTES[signin], true);
+    }catch(err){toast(err.message,true);}
   }
   init();
 })();

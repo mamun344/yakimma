@@ -179,6 +179,22 @@ CREATE TABLE IF NOT EXISTS kid_checks (
   tries INTEGER NOT NULL DEFAULT 0,
   email_ok INTEGER NOT NULL DEFAULT 0
 );
+-- Someone part-way through adding their email to their account (see /api/me/email), like adult_checks.
+CREATE TABLE IF NOT EXISTS email_checks (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  email TEXT NOT NULL,
+  code_hash TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  tries INTEGER NOT NULL DEFAULT 0,
+  email_ok INTEGER NOT NULL DEFAULT 0
+);
+-- A code a new device is showing for quick sign-in (see /api/quick-signin), and the account that confirmed it, once
+-- someone has.
+CREATE TABLE IF NOT EXISTS quick_signins (
+  code TEXT PRIMARY KEY,
+  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  expires_at INTEGER NOT NULL
+);
 -- Learn! 📚: the class (1 to 9) and region a parent chose for each subject.
 -- Learn! 📚: faith subjects (Islam, Christianity) a parent has verified for the child.
 CREATE TABLE IF NOT EXISTS learn_verified (
@@ -308,10 +324,20 @@ for (const [name, definition] of [
   ["assistant_id", "INTEGER REFERENCES users(id) ON DELETE SET NULL"],
   // A suspension the creator gave: until when (milliseconds since 1970) and why. See /api/users/:id/suspend.
   ["suspended_until", "INTEGER"],
-  ["suspend_reason", "TEXT"]
+  ["suspend_reason", "TEXT"],
+  // Their own email, added on their Profile, so they can sign in with Google if they don't know their password.
+  ["email", "TEXT"],
+  // 💙 Boy or 💗 Girl, which decides whose posts they see (see SEES_AUDIENCE). Everyone picks one and does a face scan.
+  // When the scan doesn't agree, or can't tell, what they picked waits in gender_wanted (with the scan's guess) until
+  // the creator decides.
+  ["gender", "TEXT"],
+  ["gender_wanted", "TEXT"],
+  ["gender_guess", "TEXT"]
 ]) {
   if (!userColumns.includes(name)) db.exec(`ALTER TABLE users ADD COLUMN ${name} ${definition}`);
 }
+// Each email can only be on one account, whatever its capitals.
+db.exec("CREATE UNIQUE INDEX IF NOT EXISTS users_email ON users(email COLLATE NOCASE) WHERE email IS NOT NULL");
 // A reply to a comment has the comment it answers. Replies are one level deep, and go when that comment goes.
 if (!db.prepare("PRAGMA table_info(comments)").all().some(c => c.name === "parent_id")) db.exec("ALTER TABLE comments ADD COLUMN parent_id INTEGER REFERENCES comments(id) ON DELETE CASCADE");
 // The creator's account used to be called Manhatukfayay. Now its username is Creator and Manhatukfayay is its display
@@ -335,11 +361,18 @@ if (!db.prepare("PRAGMA table_info(posts)").all().some(c => c.name === "kid")) d
 if (!db.prepare("PRAGMA table_info(posts)").all().some(c => c.name === "thumb_path")) db.exec("ALTER TABLE posts ADD COLUMN thumb_path TEXT");
 // Reporting a post for "Something else" needs the reporter to say what's wrong, in their own words, for the admins.
 if (!db.prepare("PRAGMA table_info(post_reports)").all().some(c => c.name === "details")) db.exec("ALTER TABLE post_reports ADD COLUMN details TEXT");
+// Those words also go to the creator, saved with their 🔔 notification.
+if (!db.prepare("PRAGMA table_info(notifications)").all().some(c => c.name === "details")) db.exec("ALTER TABLE notifications ADD COLUMN details TEXT");
+// Nobody can report or block the creator, so any reports on the creator's posts or comments, and blocks on them, go.
+db.exec(`DELETE FROM post_reports WHERE post_id IN (SELECT p.id FROM posts p JOIN users u ON u.id=p.user_id WHERE lower(u.username)='creator');
+  DELETE FROM comment_reports WHERE comment_id IN (SELECT c.id FROM comments c JOIN users u ON u.id=c.user_id WHERE lower(u.username)='creator');
+  DELETE FROM blocks WHERE blocked_id IN (SELECT id FROM users WHERE lower(username)='creator');`);
 // Like YouTube, a post has a description under its caption, and who can see it: "public" (everyone, on the feed and the
 // person's profile), "unlisted" (only the person's friends on Yakimma) or "private" (only the person who posted it).
 // The person can change it any time.
 const postColumns = db.prepare("PRAGMA table_info(posts)").all().map(c => c.name);
-for (const [name, definition] of [["description", "TEXT NOT NULL DEFAULT ''"], ["visibility", "TEXT NOT NULL DEFAULT 'public'"]]) {
+// Who a post is for: "boys", "girls" or "both". Posts from before this was asked are for both, and so are group posts.
+for (const [name, definition] of [["description", "TEXT NOT NULL DEFAULT ''"], ["visibility", "TEXT NOT NULL DEFAULT 'public'"], ["audience", "TEXT NOT NULL DEFAULT 'both'"]]) {
   if (!postColumns.includes(name)) db.exec(`ALTER TABLE posts ADD COLUMN ${name} ${definition}`);
 }
 const VISIBILITIES = ["public", "unlisted", "private"], MAX_DESCRIPTION = 2000;
@@ -363,8 +396,20 @@ db.exec("CREATE UNIQUE INDEX IF NOT EXISTS posts_code ON posts(code)");
 // For lists of posts: public ones, and unlisted ones by the viewer or the viewer's friends. Its 3 ?s are the viewer.
 const SEES_POST = `(p.visibility='public' OR (p.visibility='unlisted' AND (p.user_id=? OR EXISTS(SELECT 1 FROM friendships f WHERE f.status='accepted'
   AND ((f.requester_id=p.user_id AND f.addressee_id=?) OR (f.addressee_id=p.user_id AND f.requester_id=?))))))`;
-// Whether someone can see one post: public, theirs, or unlisted by a friend.
-const seesPost = (viewerId, post) => post.visibility === "public" || post.userId === viewerId || (post.visibility === "unlisted" && areFriends(viewerId, post.userId));
+// Boys see posts for boys, girls see posts for girls, and everyone sees posts for both (and their own). The creator sees
+// them all, so they can delete posts put in the wrong zone. Guests, and people who haven't got a gender yet, only see
+// posts for both.
+const AUDIENCES = ["boys", "girls", "both"];
+function audienceOf(viewerId) {
+  const u = db.prepare("SELECT username, gender FROM users WHERE id=?").get(viewerId || 0);
+  return isCreator(u?.username) ? "all" : { boy: "boys", girl: "girls" }[u?.gender] || "both";
+}
+// For lists of posts, like SEES_POST. Its params are audienceParams(viewer).
+const SEES_AUDIENCE = "(p.audience='both' OR p.audience=? OR ?='all' OR p.user_id=?)";
+const audienceParams = viewerId => { const a = audienceOf(viewerId); return [a, a, viewerId || 0]; };
+// Whether someone can see one post: public, theirs, or unlisted by a friend, and for them (see SEES_AUDIENCE).
+const seesPost = (viewerId, post) => (post.visibility === "public" || post.userId === viewerId || (post.visibility === "unlisted" && areFriends(viewerId, post.userId)))
+  && (post.audience === "both" || post.userId === viewerId || [post.audience, "all"].includes(audienceOf(viewerId)));
 db.exec("CREATE INDEX IF NOT EXISTS posts_group ON posts(group_key, id)");
 db.exec("CREATE INDEX IF NOT EXISTS posts_user ON posts(user_id, id)");
 // Chats used to be kept in two tables. Move any old messages into `messages` once, then remove the old tables.
@@ -623,7 +668,7 @@ function setAvatarPhoto(userId, filename) {
 function currentUser(req) {
   if (!req.session.userId) return null;
   // Only whether the kiddy zone birth dates are filled in. The dates themselves are never sent anywhere.
-  return db.prepare(`SELECT id, username, mc, lc, hand_tone, avatar_emoji, avatar_bg, avatar_path, theme, zone_theme, adult_verified_at, adult_on, kid_pass_hash, kid_face, kid_on, song, religion, country, suspended_until, suspend_reason,
+  return db.prepare(`SELECT id, username, mc, lc, hand_tone, avatar_emoji, avatar_bg, avatar_path, theme, zone_theme, adult_verified_at, adult_on, kid_pass_hash, kid_face, kid_on, song, religion, country, suspended_until, suspend_reason, email, gender, gender_wanted,
     (kid_birth_date IS NOT NULL AND parent_birth_date IS NOT NULL) AS kid_birth_dates FROM users WHERE id = ?`).get(req.session.userId) || null;
 }
 // A suspended account can't do anything until its suspension is over (it can still sign out and read the rules).
@@ -661,7 +706,8 @@ function avatarOf(row) {
 // and so on up to 9999999999999. Account ids start at 1 and are never reused, so the number is the id minus one.
 const MAX_ACCOUNTS = 10 ** 13;
 const accountNumber = id => String(id - 1).padStart(13, "0");
-// Yakimma's admins: they can delete anyone's posts, groups and group chat messages, and they see the Reports page.
+// Yakimma's admins: they can delete anyone's groups and group chat messages, and they see the Reports page (but only the
+// creator can do anything there, and only the creator can delete other people's posts).
 // So they can check how things look, they can also switch into the 18+ zone or the kiddy zone (and out again) without
 // the checks, the parent password or the parent's face. Write names in small letters.
 const ADMINS = ["bleh", "creator"];
@@ -675,9 +721,10 @@ const isCreator = username => username?.toLowerCase() === "creator";
 const creatorOnlyName = name => /creator|manhatukfayay/i.test(name.replace(/\s/g, ""));
 const CREATOR_ONLY = "Only the creator can have that name.";
 const isAdmin = userId => ADMINS.includes(db.prepare("SELECT username FROM users WHERE id=?").get(userId || 0)?.username.toLowerCase());
+const isCreatorId = userId => isCreator(db.prepare("SELECT username FROM users WHERE id=?").get(userId || 0)?.username);
 function publicUser(row) {
   return row ? { id: row.id, accountNumber: accountNumber(row.id), username: row.username, mc: row.mc, lc: row.lc, handTone: row.hand_tone, avatar: avatarOf(row), theme: row.adult_on ? row.zone_theme : row.theme, song: row.song, admin: ADMINS.includes(row.username.toLowerCase()), creator: isCreator(row.username), suspended: suspensionOf(row),
-    religion: row.religion, country: row.country,
+    religion: row.religion, country: row.country, email: row.email || null, gender: row.gender || null, genderWaiting: row.gender_wanted || null,
     adult: { verified: Boolean(row.adult_verified_at), on: Boolean(row.adult_on) },
     kid: { ready: Boolean(row.kid_pass_hash), face: Boolean(row.kid_face), on: Boolean(row.kid_on), birthDates: Boolean(row.kid_birth_dates) },
     ...assistantInfo(row.id, row.id) } : null;
@@ -851,12 +898,12 @@ const MAX_REACTIONS = 20;
 // ---- 🔔 Notifications and @tags ----
 // Tells someone what another person did, for their 🔔 bell. Nothing goes to yourself, between people where one blocked
 // the other, or twice for the same thing (like liking a post, unliking it and liking it again).
-function notify(userId, actorId, kind, { postId = null, commentId = null, messageId = null, emoji = null } = {}) {
+function notify(userId, actorId, kind, { postId = null, commentId = null, messageId = null, emoji = null, details = null } = {}) {
   if (!userId || !actorId || userId === actorId || !canSee(userId, actorId)) return;
-  const same = db.prepare(`SELECT 1 FROM notifications WHERE user_id=? AND actor_id=? AND kind=? AND post_id IS ? AND comment_id IS ? AND message_id IS ? AND emoji IS ?`)
-    .get(userId, actorId, kind, postId, commentId, messageId, emoji);
-  if (!same) db.prepare("INSERT INTO notifications(user_id,actor_id,kind,post_id,comment_id,message_id,emoji) VALUES(?,?,?,?,?,?,?)")
-    .run(userId, actorId, kind, postId, commentId, messageId, emoji);
+  const same = db.prepare(`SELECT 1 FROM notifications WHERE user_id=? AND actor_id=? AND kind=? AND post_id IS ? AND comment_id IS ? AND message_id IS ? AND emoji IS ? AND details IS ?`)
+    .get(userId, actorId, kind, postId, commentId, messageId, emoji, details);
+  if (!same) db.prepare("INSERT INTO notifications(user_id,actor_id,kind,post_id,comment_id,message_id,emoji,details) VALUES(?,?,?,?,?,?,?,?)")
+    .run(userId, actorId, kind, postId, commentId, messageId, emoji, details);
 }
 // Writing @username in a post, a comment or a chat message tags that person. The same pattern is in app.js.
 const MENTION = /(^|[^A-Za-z0-9@])@([A-Za-z0-9]{3,20})(?![A-Za-z0-9])/g;
@@ -887,7 +934,7 @@ function groupBrief(key, userId) {
 const NOTIFICATIONS_SHOWN = 50;
 // Someone's newest notifications, leaving out people they can't see (because of a block) and deleted messages.
 function notificationsPayload(userId) {
-  const rows = db.prepare(`SELECT n.id, n.kind, n.emoji, n.created_at AS createdAt, n.read_at AS readAt, n.comment_id AS commentId,
+  const rows = db.prepare(`SELECT n.id, n.kind, n.emoji, n.details, n.created_at AS createdAt, n.read_at AS readAt, n.comment_id AS commentId,
       n.actor_id AS actorId, u.username, u.avatar_emoji, u.avatar_bg, u.avatar_path,
       p.id AS postId, p.code AS postCode, p.group_key AS postGroup, c.body AS commentBody,
       m.id AS messageId, m.group_key AS messageGroup, m.deleted_at AS messageDeleted
@@ -895,7 +942,7 @@ function notificationsPayload(userId) {
       LEFT JOIN posts p ON p.id=n.post_id LEFT JOIN comments c ON c.id=n.comment_id LEFT JOIN messages m ON m.id=n.message_id
     WHERE n.user_id=? ORDER BY n.id DESC LIMIT ?`).all(userId, NOTIFICATIONS_SHOWN * 2);
   const notifications = rows.filter(n => canSee(userId, n.actorId) && !n.messageDeleted).slice(0, NOTIFICATIONS_SHOWN).map(n => ({
-    id: n.id, kind: n.kind, emoji: n.emoji, createdAt: n.createdAt, read: Boolean(n.readAt),
+    id: n.id, kind: n.kind, emoji: n.emoji, details: n.details, createdAt: n.createdAt, read: Boolean(n.readAt),
     actor: { id: n.actorId, username: n.username, avatar: avatarOf(n) },
     post: n.postId ? { id: n.postId, code: n.postCode, groupKey: n.postGroup } : null,
     comment: n.commentId ? { id: n.commentId, preview: n.commentBody.slice(0, 80) } : null,
@@ -963,7 +1010,7 @@ const markRead = (me, chat) => { if (chat.friendId) db.prepare("UPDATE messages 
 // Posts as the browser shows them; `where` picks which ones, in id order ("DESC" is newest first).
 function selectPosts(viewerId, where, params, order = "DESC", limit = 100) {
   return db.prepare(`
-    SELECT p.id, p.code, p.user_id AS userId, u.username, p.caption, p.description, p.visibility, p.group_key AS groupKey, p.media_path AS mediaPath,
+    SELECT p.id, p.code, p.user_id AS userId, u.username, p.caption, p.description, p.visibility, p.audience, p.group_key AS groupKey, p.media_path AS mediaPath,
       p.thumb_path AS thumbPath, p.media_type AS mediaType, p.created_at AS createdAt, u.avatar_emoji, u.avatar_bg, u.avatar_path,
       (SELECT COUNT(*) FROM likes l WHERE l.post_id=p.id) AS likes,
       EXISTS(SELECT 1 FROM likes l WHERE l.post_id=p.id AND l.user_id=?) AS liked,
@@ -973,16 +1020,16 @@ function selectPosts(viewerId, where, params, order = "DESC", limit = 100) {
     WHERE ${where}
     ORDER BY p.id ${order} LIMIT ?
   `).all(viewerId || 0, viewerId || 0, viewerId || 0, ...params, limit).map(p => ({
-    id: p.id, code: p.code, userId: p.userId, username: p.username, avatar: avatarOf(p), caption: p.caption, description: p.description, visibility: p.visibility, inGroup: Boolean(p.groupKey),
+    id: p.id, code: p.code, userId: p.userId, username: p.username, avatar: avatarOf(p), caption: p.caption, description: p.description, visibility: p.visibility, audience: p.audience, inGroup: Boolean(p.groupKey),
     mediaUrl: p.mediaPath ? `/uploads/${encodeURIComponent(p.mediaPath)}` : null, thumbUrl: p.thumbPath ? `/uploads/${encodeURIComponent(p.thumbPath)}` : null,
     mediaType: p.mediaType, createdAt: p.createdAt, likes: p.likes, liked: Boolean(p.liked), inPlaylist: Boolean(p.inPlaylist), comments: p.comments
   }));
 }
-// The newest 100 posts on the main feed (or in a group) the viewer may see (public, or unlisted by them or a friend),
-// hiding people the viewer blocked.
+// The newest 100 posts on the main feed (or in a group) the viewer may see (public, or unlisted by them or a friend, and
+// for their gender), hiding people the viewer blocked.
 function postRows(viewerId, groupKey = null) {
   const v = viewerId || 0;
-  return selectPosts(viewerId, `p.group_key IS ? AND ${SEES_POST} AND p.adult=? AND p.kid=? AND NOT EXISTS(SELECT 1 FROM blocks b WHERE b.blocker_id=? AND b.blocked_id=p.user_id)`, [groupKey, v, v, v, ...postZone(viewerId), v]);
+  return selectPosts(viewerId, `p.group_key IS ? AND ${SEES_POST} AND ${SEES_AUDIENCE} AND p.adult=? AND p.kid=? AND NOT EXISTS(SELECT 1 FROM blocks b WHERE b.blocker_id=? AND b.blocked_id=p.user_id)`, [groupKey, v, v, v, ...audienceParams(v), ...postZone(viewerId), v]);
 }
 function apiError(err, _req, res, _next) {
   if (err instanceof multer.MulterError) {
@@ -994,7 +1041,7 @@ function apiError(err, _req, res, _next) {
 
 app.get("/api/me", (req, res) => {
   const u = currentUser(req);
-  if (!u) return res.json({ user: null, products, themes, nailOptions, avatarOptions, reportReasons: REPORT_REASONS, religions: RELIGIONS, countries: COUNTRIES, displayNames: displayNames() });
+  if (!u) return res.json({ user: null, products, themes, nailOptions, avatarOptions, reportReasons: REPORT_REASONS, religions: RELIGIONS, countries: COUNTRIES, displayNames: displayNames(), googleSignIn: googleReady });
   res.json({ user: publicUser(u), displayNames: displayNames(), notifications: unreadNotifications(u.id), inventory: inventoryOf(u.id), products, themes, nailOptions, avatarOptions, reportReasons: REPORT_REASONS, religions: RELIGIONS, countries: COUNTRIES, learn: learnPayload(u.id), usernameCost: USERNAME_COST, songs: songsPayload(u.id) });
 });
 
@@ -1181,6 +1228,149 @@ app.post("/api/logout", kidFaceLimiter, async (req, res, next) => {
   });
 });
 
+// ---- Other ways to sign in, for when you don't know your password ----
+// Your email: on your Profile, 📧 Email sends a code to it, and typing the code saves it to your account. It's only used
+// to sign in with Google, and nobody else ever sees it. Each email can only be on one account.
+const EMAIL_CODE_MINUTES = 10, EMAIL_CODE_TRIES = 5;
+const emailLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 15, standardHeaders: true, legacyHeaders: false, message: { error: "Too many tries. Please wait 15 minutes and try again." } });
+const EMAIL_TAKEN = "That email is already on another Yakimma account.";
+app.post("/api/me/email", requireAuth, emailLimiter, async (req, res) => {
+  const me = req.session.userId, email = String(req.body.email || "").trim().slice(0, 254);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: "Type your whole email address, like name@example.com." });
+  const owner = db.prepare("SELECT id FROM users WHERE email=? COLLATE NOCASE").get(email)?.id;
+  if (owner === me) return res.status(400).json({ error: "That email is already on your account." });
+  if (owner) return res.status(409).json({ error: EMAIL_TAKEN });
+  if (!mailer && isProduction) return res.status(503).json({ error: "Yakimma can't send emails yet, so you can't add an email right now." });
+  const wait = codeResendWait("email_checks", me, email, EMAIL_CODE_MINUTES, EMAIL_CODE_TRIES);
+  if (wait) return codeJustSent(res, wait);
+  const code = String(crypto.randomInt(0, 1000000)).padStart(6, "0");
+  db.prepare(`INSERT INTO email_checks(user_id,email,code_hash,expires_at) VALUES(?,?,?,?)
+    ON CONFLICT(user_id) DO UPDATE SET email=excluded.email, code_hash=excluded.code_hash, expires_at=excluded.expires_at, tries=0, email_ok=0`)
+    .run(me, email, hashCode(code).toString("hex"), Date.now() + EMAIL_CODE_MINUTES * 60 * 1000);
+  if (!mailer) return res.json({ sent: false, testCode: code });
+  try {
+    const sent = await mailer.sendMail({
+      from: { name: "Yakimma", address: mail.from }, to: email, subject: `Your Yakimma email code: ${code}`,
+      text: `The Yakimma account ${currentUser(req).username} wants to add this email, so it can sign in with Google.\n\nYour code is ${code}\n\n` +
+        `It works for ${EMAIL_CODE_MINUTES} minutes. If you didn't ask for this code, you can ignore this email.`
+    });
+    console.log(`Email: email code handed to ${mail.host} (${sent.response})`);
+  } catch (err) {
+    db.prepare("DELETE FROM email_checks WHERE user_id=?").run(me);
+    console.error("Email code email failed:", err.message);
+    return res.status(502).json({ error: "That email couldn't be sent. Check the address and try again." });
+  }
+  res.json({ sent: true });
+});
+app.post("/api/me/email/code", requireAuth, emailLimiter, (req, res) => {
+  const me = req.session.userId, check = db.prepare("SELECT * FROM email_checks WHERE user_id=?").get(me);
+  if (!check) return res.status(400).json({ error: "Ask for a code first." });
+  if (check.expires_at < Date.now() || check.tries >= EMAIL_CODE_TRIES) return res.status(400).json({ error: "That code has run out. Go back and ask for a new one." });
+  const given = hashCode(String(req.body.code || "").replace(/\D/g, "")), wanted = Buffer.from(check.code_hash, "hex");
+  if (!crypto.timingSafeEqual(given, wanted)) {
+    db.prepare("UPDATE email_checks SET tries=tries+1 WHERE user_id=?").run(me);
+    return res.status(400).json({ error: "That code isn't right. Check your email and try again." });
+  }
+  try {
+    db.transaction(() => {
+      db.prepare("UPDATE users SET email=? WHERE id=?").run(check.email, me);
+      db.prepare("DELETE FROM email_checks WHERE user_id=?").run(me);
+    })();
+  } catch (err) {
+    if (String(err.code) === "SQLITE_CONSTRAINT_UNIQUE") return res.status(409).json({ error: EMAIL_TAKEN });
+    throw err;
+  }
+  res.json({ user: publicUser(currentUser(req)) });
+});
+
+// Sign in with Google: type your email, then sign in to Google with it. If Google says that email is yours and it's the
+// email on a Yakimma account, you're signed in to that account. It needs GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET (see
+// the README); until they're set, the sign-in box says it isn't ready yet.
+const google = { id: process.env.GOOGLE_CLIENT_ID, secret: process.env.GOOGLE_CLIENT_SECRET };
+const googleReady = Boolean(google.id && google.secret);
+// Google sends people back here, so this exact address has to be added to the Google client (on each site it runs on).
+const googleReturn = req => `${req.protocol}://${req.get("host")}/api/auth/google/callback`;
+// Back on Yakimma, the page says how it went (see SIGNIN_NOTES in app.js).
+const backToYakimma = (res, how) => res.redirect(`/?signin=${how}`);
+app.get("/api/auth/google", authLimiter, (req, res) => {
+  if (!googleReady) return backToYakimma(res, "google-off");
+  // A random state that has to come back from Google, so nobody can send someone here with their own Google sign-in.
+  req.session.googleState = crypto.randomBytes(24).toString("base64url");
+  const email = String(req.query.email || "").trim().slice(0, 254);
+  const params = new URLSearchParams({ client_id: google.id, redirect_uri: googleReturn(req), response_type: "code", scope: "openid email",
+    state: req.session.googleState, prompt: "select_account", ...(email && { login_hint: email }) });
+  res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
+});
+app.get("/api/auth/google/callback", authLimiter, async (req, res, next) => {
+  const expected = req.session.googleState;
+  delete req.session.googleState;
+  if (!googleReady) return backToYakimma(res, "google-off");
+  if (!expected || req.query.state !== expected) return backToYakimma(res, "google-failed");
+  if (req.query.error || !req.query.code) return backToYakimma(res, "google-cancelled");
+  let who;
+  try {
+    const answer = await fetch("https://oauth2.googleapis.com/token", { method: "POST", body: new URLSearchParams({
+      code: String(req.query.code), client_id: google.id, client_secret: google.secret, redirect_uri: googleReturn(req), grant_type: "authorization_code" }) });
+    const token = await answer.json();
+    if (!answer.ok || !token.id_token) throw new Error(token.error_description || token.error || `Google answered ${answer.status}`);
+    // The ID token came straight from Google over HTTPS, so its signature doesn't need checking (OpenID Connect 3.1.3.7).
+    who = JSON.parse(Buffer.from(token.id_token.split(".")[1], "base64url").toString("utf8"));
+    if (who.aud !== google.id || !["https://accounts.google.com", "accounts.google.com"].includes(who.iss) || who.exp * 1000 < Date.now()) throw new Error("Google's answer wasn't for Yakimma.");
+  } catch (err) {
+    console.error("Sign in with Google failed:", err.message);
+    return backToYakimma(res, "google-failed");
+  }
+  if (!who.email || who.email_verified !== true) return backToYakimma(res, "google-unverified");
+  const row = db.prepare("SELECT * FROM users WHERE email=? COLLATE NOCASE").get(who.email);
+  if (!row) return backToYakimma(res, "google-nomatch");
+  if (suspensionOf(row)) return backToYakimma(res, "suspended");
+  req.session.regenerate(err => {
+    if (err) return next(err);
+    req.session.userId = row.id;
+    backToYakimma(res, "google");
+  });
+});
+
+// Quick sign-in: a new device shows a code. On a device that's already signed in, you type it in the 📲 Quick sign in
+// box on your Profile and confirm, and the new device is signed in to your account (the old one stays signed in too).
+// Codes are 8 letters and numbers, without 0, O, 1 or I (they look alike), and work for QUICK_MINUTES.
+const QUICK_MINUTES = 5, QUICK_LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+// Only wrong codes count, so nobody can try lots of codes.
+const quickLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, skipSuccessfulRequests: true, standardHeaders: true, legacyHeaders: false, message: { error: "Too many wrong codes. Please wait 15 minutes and try again." } });
+setInterval(() => db.prepare("DELETE FROM quick_signins WHERE expires_at < ?").run(Date.now()), 60 * 60 * 1000).unref();
+// The new device asks for a code. Asking again replaces it.
+app.post("/api/quick-signin", authLimiter, (req, res) => {
+  if (req.session.userId) return res.status(400).json({ error: "You're already signed in." });
+  if (req.session.quickCode) db.prepare("DELETE FROM quick_signins WHERE code=?").run(req.session.quickCode);
+  let code;
+  do code = Array.from({ length: 8 }, () => QUICK_LETTERS[crypto.randomInt(QUICK_LETTERS.length)]).join("");
+  while (db.prepare("SELECT 1 FROM quick_signins WHERE code=?").get(code));
+  db.prepare("INSERT INTO quick_signins(code,expires_at) VALUES(?,?)").run(code, Date.now() + QUICK_MINUTES * 60 * 1000);
+  req.session.quickCode = code;
+  res.json({ code, minutes: QUICK_MINUTES });
+});
+// The new device checks every few seconds whether its code has been confirmed, and is signed in once it has.
+app.get("/api/quick-signin", (req, res, next) => {
+  const code = req.session.quickCode, row = code && db.prepare("SELECT * FROM quick_signins WHERE code=?").get(code);
+  if (!row || row.expires_at < Date.now()) return res.json({ expired: true });
+  if (!row.user_id) return res.json({ waiting: true });
+  db.prepare("DELETE FROM quick_signins WHERE code=?").run(code);
+  const user = db.prepare("SELECT * FROM users WHERE id=?").get(row.user_id);
+  if (suspensionOf(user)) return res.status(403).json({ error: suspendedMessage(suspensionOf(user)) });
+  req.session.regenerate(err => {
+    if (err) return next(err);
+    req.session.userId = user.id;
+    res.json({ user: publicUser(currentUser(req)) });
+  });
+});
+// On the device that's signed in: confirming the code gives the new device this account.
+app.post("/api/quick-signin/confirm", requireAuth, quickLimiter, (req, res) => {
+  const code = String(req.body.code || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const confirmed = db.prepare("UPDATE quick_signins SET user_id=? WHERE code=? AND user_id IS NULL AND expires_at>?").run(req.session.userId, code, Date.now()).changes;
+  if (!confirmed) return res.status(400).json({ error: "That code isn't right, or it ran out. Check the code on the new device." });
+  res.json({ ok: true });
+});
+
 app.get("/api/posts", (req, res) => res.json({ posts: postRows(currentUser(req)?.id) }));
 
 // Your own feed posts for your profile, newest or oldest first, a page at a time. `after` is the last post id already shown.
@@ -1206,16 +1396,16 @@ function createPost(req, res, next, groupKey) {
     if (thumbFile && !thumb) fs.unlink(thumbFile.path, () => {});
     try {
       const caption = String(req.body.caption || "").trim().slice(0, 240), description = String(req.body.description || "").trim().slice(0, MAX_DESCRIPTION);
-      // Group posts are always public to the group.
+      // Group posts are always public to the whole group, boys and girls.
       const visibility = !groupKey && VISIBILITIES.includes(req.body.visibility) ? req.body.visibility : "public";
-      if (!caption) {
-        for (const f of [req.file, thumb]) if (f) fs.unlink(f.path, () => {});
-        return res.status(400).json({ error: "Add a caption before posting." });
-      }
+      const audience = groupKey ? "both" : req.body.audience;
+      const refuse = error => { for (const f of [req.file, thumb]) if (f) fs.unlink(f.path, () => {}); res.status(400).json({ error }); };
+      if (!caption) return refuse("Add a caption before posting.");
+      if (!AUDIENCES.includes(audience)) return refuse("Choose who it's for first: 💙 Boys, 💗 Girls or 💜 Both.");
       const type = req.file ? req.file.mimetype : null;
       const code = newPostCode();
-      const result = db.prepare("INSERT INTO posts(user_id,code,caption,description,visibility,media_path,media_type,thumb_path,group_key,adult,kid) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
-        .run(req.session.userId, code, caption, description, visibility, req.file ? path.basename(req.file.filename) : null, type, thumb ? path.basename(thumb.filename) : null, groupKey, ...postZone(req.session.userId));
+      const result = db.prepare("INSERT INTO posts(user_id,code,caption,description,visibility,audience,media_path,media_type,thumb_path,group_key,adult,kid) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
+        .run(req.session.userId, code, caption, description, visibility, audience, req.file ? path.basename(req.file.filename) : null, type, thumb ? path.basename(thumb.filename) : null, groupKey, ...postZone(req.session.userId));
       notifyPostTags(req.session.userId, Number(result.lastInsertRowid), [caption, description]);
       res.status(201).json({ postId: Number(result.lastInsertRowid), code, posts: postRows(req.session.userId, groupKey) });
     } catch (e) { next(e); }
@@ -1242,6 +1432,15 @@ app.put("/api/posts/:id/visibility", requireAuth, (req, res) => {
   db.prepare("UPDATE posts SET visibility=? WHERE id=?").run(visibility, post.id);
   res.json({ ok: true, visibility });
 });
+// Changing who a post is for (boys, girls or both). The person who posted it can, and so can the creator.
+app.put("/api/posts/:id/audience", requireAuth, (req, res) => {
+  const me = req.session.userId, post = db.prepare("SELECT id, user_id, group_key FROM posts WHERE id=?").get(Number(req.params.id)), audience = req.body.audience;
+  if (!post || (post.user_id !== me && !isCreatorId(me))) return res.status(404).json({ error: "You can only change your own posts." });
+  if (post.group_key) return res.status(400).json({ error: "Group posts are always for the whole group." });
+  if (!AUDIENCES.includes(audience)) return res.status(400).json({ error: "Choose 💙 Boys, 💗 Girls or 💜 Both." });
+  db.prepare("UPDATE posts SET audience=? WHERE id=?").run(audience, post.id);
+  res.json({ ok: true, audience });
+});
 
 // The person who posted a video can give it a thumbnail, or a new one, any time.
 app.put("/api/posts/:id/thumbnail", requireAuth, (req, res, next) => {
@@ -1260,11 +1459,11 @@ app.put("/api/posts/:id/thumbnail", requireAuth, (req, res, next) => {
   });
 });
 
-// You can delete your own posts (videos, photos and text). Admins can delete anyone's.
+// You can delete your own posts (videos, photos and text). The creator can delete anyone's.
 app.delete("/api/posts/:id", requireAuth, (req, res) => {
   const me = req.session.userId, post = db.prepare("SELECT id, user_id, media_path, thumb_path FROM posts WHERE id=?").get(Number(req.params.id));
   if (!post) return res.status(404).json({ error: "That post is already gone." });
-  if (post.user_id !== me && !isAdmin(me)) return res.status(403).json({ error: "You can only delete your own posts." });
+  if (post.user_id !== me && !isCreatorId(me)) return res.status(403).json({ error: "You can only delete your own posts." });
   db.prepare("DELETE FROM posts WHERE id=?").run(post.id);
   for (const file of [post.media_path, post.thumb_path]) if (file) fs.unlink(path.join(uploadDir, path.basename(file)), () => {});
   res.json({ ok: true });
@@ -1273,17 +1472,23 @@ app.delete("/api/posts/:id", requireAuth, (req, res) => {
 // Reporting someone else's post. Each person can report a post once (reporting again changes the reason).
 const REPORT_REASONS = ["😠 Mean or bullying", "🧸 Not OK for kids", "📢 Spam", "❓ Something else"];
 const SOMETHING_ELSE = REPORT_REASONS.at(-1), MAX_REPORT_DETAILS = 500;
+// Nobody can report the creator's posts or comments: that's against Yakimma's rules.
+const CREATOR_UNREPORTABLE = "Nobody can report the creator.";
+// What someone wrote for "Something else" goes to the creator as a 🔔 notification.
+const creatorId = () => db.prepare("SELECT id FROM users WHERE lower(username)='creator'").get()?.id;
 const reportLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: true, legacyHeaders: false, message: { error: "You're reporting a lot. Please wait a little while." } });
 app.post("/api/posts/:id/report", requireAuth, reportLimiter, (req, res) => {
-  const me = req.session.userId, post = db.prepare("SELECT id, user_id AS userId, user_id, adult, kid, visibility FROM posts WHERE id=?").get(Number(req.params.id)), [adult, kid] = postZone(me);
+  const me = req.session.userId, post = db.prepare("SELECT id, user_id AS userId, user_id, adult, kid, visibility, audience FROM posts WHERE id=?").get(Number(req.params.id)), [adult, kid] = postZone(me);
   if (!post || post.adult !== adult || post.kid !== kid || !seesPost(me, post)) return res.status(404).json({ error: "Post not found." });
   if (post.user_id === me) return res.status(400).json({ error: "You can't report your own post. You can delete it instead." });
+  if (isCreatorId(post.user_id)) return res.status(403).json({ error: CREATOR_UNREPORTABLE });
   if (!REPORT_REASONS.includes(req.body.reason)) return res.status(400).json({ error: "Choose why you're reporting it." });
   // "Something else" has to say what's wrong, in the reporter's own words. The other reasons don't take any words.
   const details = req.body.reason === SOMETHING_ELSE ? cleanText(req.body.details).slice(0, MAX_REPORT_DETAILS) : null;
-  if (req.body.reason === SOMETHING_ELSE && details.length < 3) return res.status(400).json({ error: "Write what's wrong in your own words, so the admins know." });
+  if (req.body.reason === SOMETHING_ELSE && details.length < 3) return res.status(400).json({ error: "Write what's wrong in your own words, so the creator knows." });
   db.prepare(`INSERT INTO post_reports(post_id,reporter_id,reason,details) VALUES(?,?,?,?)
     ON CONFLICT(post_id,reporter_id) DO UPDATE SET reason=excluded.reason, details=excluded.details, created_at=CURRENT_TIMESTAMP`).run(post.id, me, req.body.reason, details);
+  if (details) notify(creatorId(), me, "report", { postId: post.id, details });
   res.json({ ok: true });
 });
 // Reporting someone else's comment works the same way.
@@ -1291,15 +1496,18 @@ app.post("/api/comments/:id/report", requireAuth, reportLimiter, (req, res) => {
   const me = req.session.userId, found = seenComment(req, res);
   if (!found) return;
   if (found.comment.userId === me) return res.status(400).json({ error: "You can't report your own comment. You can delete it instead." });
+  if (isCreatorId(found.comment.userId)) return res.status(403).json({ error: CREATOR_UNREPORTABLE });
   if (!REPORT_REASONS.includes(req.body.reason)) return res.status(400).json({ error: "Choose why you're reporting it." });
   const details = req.body.reason === SOMETHING_ELSE ? cleanText(req.body.details).slice(0, MAX_REPORT_DETAILS) : null;
-  if (req.body.reason === SOMETHING_ELSE && details.length < 3) return res.status(400).json({ error: "Write what's wrong in your own words, so the admins know." });
+  if (req.body.reason === SOMETHING_ELSE && details.length < 3) return res.status(400).json({ error: "Write what's wrong in your own words, so the creator knows." });
   db.prepare(`INSERT INTO comment_reports(comment_id,reporter_id,reason,details) VALUES(?,?,?,?)
     ON CONFLICT(comment_id,reporter_id) DO UPDATE SET reason=excluded.reason, details=excluded.details, created_at=CURRENT_TIMESTAMP`).run(found.comment.id, me, req.body.reason, details);
+  if (details) notify(creatorId(), me, "report", { postId: found.post.id, commentId: found.comment.id, details });
   res.json({ ok: true });
 });
 // The Reports page, for admins (it isn't in the kiddy zone): reported 18+ posts in the 18+ zone, and reported posts from
-// the normal site and the kiddy zone everywhere else, newest report first, with who reported them and why.
+// the normal site and the kiddy zone everywhere else, newest report first, with who reported them and why. The other
+// admins can only look: only the creator suspends, deletes or keeps.
 function requireAdmin(req, res, next) {
   if (!isAdmin(req.session.userId)) return res.status(403).json({ error: "Only Yakimma's admins can see reports." });
   next();
@@ -1328,18 +1536,18 @@ function reportsPayload(userId) {
 }
 app.get("/api/reports", requireAuth, requireAdmin, (req, res) => res.json(reportsPayload(req.session.userId)));
 // Keeping a reported comment: its reports are cleared.
-app.delete("/api/reports/comments/:commentId", requireAuth, requireAdmin, (req, res) => {
+app.delete("/api/reports/comments/:commentId", requireAuth, requireCreator, (req, res) => {
   db.prepare("DELETE FROM comment_reports WHERE comment_id=?").run(Number(req.params.commentId));
   res.json(reportsPayload(req.session.userId));
 });
 // Keeping a reported post: its reports are cleared.
-app.delete("/api/reports/:postId", requireAuth, requireAdmin, (req, res) => {
+app.delete("/api/reports/:postId", requireAuth, requireCreator, (req, res) => {
   db.prepare("DELETE FROM post_reports WHERE post_id=?").run(Number(req.params.postId));
   res.json(reportsPayload(req.session.userId));
 });
 
 const likeTransaction = db.transaction((userId, postId) => {
-  const post = db.prepare("SELECT id,user_id,user_id AS userId,group_key AS groupKey,adult,kid,visibility FROM posts WHERE id=?").get(postId), [adult, kid] = postZone(userId);
+  const post = db.prepare("SELECT id,user_id,user_id AS userId,group_key AS groupKey,adult,kid,visibility,audience FROM posts WHERE id=?").get(postId), [adult, kid] = postZone(userId);
   if (!post || post.adult !== adult || post.kid !== kid || !seesPost(userId, post)) return { error: "Post not found.", status: 404 };
   if (post.groupKey) {
     const group = findGroup(post.groupKey);
@@ -1384,8 +1592,7 @@ function seenComment(req, res) {
   if (!post || !canOpenPost(req.session.userId, post)) { res.status(404).json({ error: "That comment isn't there any more." }); return null; }
   return { comment, post };
 }
-const canDeleteComment = (userId, comment, post) => Boolean(userId) && (comment.userId === userId || post.userId === userId
-  || isCreator(db.prepare("SELECT username FROM users WHERE id=?").get(userId)?.username));
+const canDeleteComment = (userId, comment, post) => Boolean(userId) && (comment.userId === userId || post.userId === userId || isCreatorId(userId));
 // A post's comments, oldest first, each with its replies (oldest first), leaving out people the viewer blocked and
 // replies to comments the viewer can't see.
 function commentsPayload(viewerId, post) {
@@ -1459,9 +1666,9 @@ function canOpenPost(userId, post) {
   return !post.groupKey || Boolean(group && isGroupMember(userId, group));
 }
 const PLAYLIST_LIMIT = 200;
-const playlistPost = id => db.prepare("SELECT id, user_id AS userId, visibility, group_key AS groupKey, adult, kid FROM posts WHERE id=?").get(id);
+const playlistPost = id => db.prepare("SELECT id, user_id AS userId, visibility, audience, group_key AS groupKey, adult, kid FROM posts WHERE id=?").get(id);
 function playlistPayload(userId) {
-  const ids = db.prepare(`SELECT p.id, p.user_id AS userId, p.visibility, p.group_key AS groupKey, p.adult, p.kid FROM playlist s JOIN posts p ON p.id=s.post_id
+  const ids = db.prepare(`SELECT p.id, p.user_id AS userId, p.visibility, p.audience, p.group_key AS groupKey, p.adult, p.kid FROM playlist s JOIN posts p ON p.id=s.post_id
     WHERE s.user_id=? ORDER BY s.created_at DESC, s.rowid DESC LIMIT ?`).all(userId, PLAYLIST_LIMIT).filter(p => canOpenPost(userId, p)).map(p => p.id);
   if (!ids.length) return { posts: [] };
   const posts = selectPosts(userId, `p.id IN (${ids.map(() => "?").join(",")})`, ids, "DESC", ids.length);
@@ -2154,10 +2361,12 @@ for (const [base, chatOf] of [["/api/groups/:id/messages", groupChatOf], ["/api/
 }
 
 // Blocking someone hides their messages and posts from you, stops their friend requests, and ends any friendship.
+// Nobody can block the creator.
 app.post("/api/blocks", requireAuth, (req, res) => {
   const me = req.session.userId, other = Number(req.body.userId);
   if (!Number.isSafeInteger(other) || !db.prepare("SELECT 1 FROM users WHERE id=?").get(other)) return res.status(404).json({ error: "That person couldn't be found." });
   if (other === me) return res.status(400).json({ error: "You can't block yourself." });
+  if (isCreatorId(other)) return res.status(403).json({ error: "Nobody can block the creator." });
   db.transaction(() => {
     db.prepare("INSERT OR IGNORE INTO blocks(blocker_id,blocked_id) VALUES(?,?)").run(me, other);
     db.prepare("DELETE FROM friendships WHERE (requester_id=? AND addressee_id=?) OR (requester_id=? AND addressee_id=?)").run(me, other, other, me);
@@ -2181,6 +2390,33 @@ function zoneError(me, other) {
   if (!inKidZone(me) && inKidZone(other)) return "They're in the kiddy zone, so only people in the kiddy zone can add or follow them.";
   return null;
 }
+// ---- 🚻 Boy or girl: everyone picks one and does a face scan. The scan runs in the browser and only sends what it
+// guessed: "boy", "girl", or nothing when it couldn't tell (or there's no camera). The camera picture never leaves the
+// device. When the guess agrees, that's their gender. When it doesn't, the creator decides and they wait until then.
+// The creator picks their own without a scan. ----
+const GENDERS = ["boy", "girl"];
+const genderLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 15, standardHeaders: true, legacyHeaders: false, message: { error: "Too many tries. Please wait 15 minutes and try again." } });
+app.post("/api/me/gender", requireAuth, genderLimiter, (req, res) => {
+  const me = currentUser(req), gender = req.body.gender, guess = GENDERS.includes(req.body.guess) ? req.body.guess : null;
+  if (me.gender) return res.status(400).json({ error: "Your gender is already chosen. Only the creator can change it." });
+  if (me.gender_wanted) return res.status(400).json({ error: "The creator is checking it. Please wait." });
+  if (!GENDERS.includes(gender)) return res.status(400).json({ error: "Choose 💙 Boy or 💗 Girl." });
+  if (isCreator(me.username) || guess === gender) db.prepare("UPDATE users SET gender=?, gender_wanted=NULL, gender_guess=NULL WHERE id=?").run(gender, me.id);
+  else {
+    db.prepare("UPDATE users SET gender_wanted=?, gender_guess=? WHERE id=?").run(gender, guess, me.id);
+    notify(creatorId(), me.id, "gender");
+  }
+  res.json({ user: publicUser(currentUser(req)) });
+});
+// The creator decides someone's gender (or changes it), and they can use Yakimma straight away.
+app.post("/api/users/:id/gender", requireAuth, requireCreator, (req, res) => {
+  const id = Number(req.params.id), gender = req.body.gender;
+  if (!GENDERS.includes(gender)) return res.status(400).json({ error: "Choose 💙 Boy or 💗 Girl." });
+  if (!db.prepare("UPDATE users SET gender=?, gender_wanted=NULL, gender_guess=NULL WHERE id=?").run(gender, id).changes) return res.status(404).json({ error: "That person couldn't be found." });
+  db.prepare("DELETE FROM notifications WHERE kind='gender' AND actor_id=?").run(id);
+  res.json({ users: genderChecks() });
+});
+
 // The creator suspends someone for any number of days, with a reason they'll see, or lifts it early.
 // Nobody can suspend the creator.
 app.post("/api/users/:id/suspend", requireAuth, requireCreator, (req, res) => {
@@ -2238,6 +2474,10 @@ app.get("/api/safety/posts", requireAuth, requireCreator, (req, res) => {
   const who = safetyUser(req);
   res.json({ posts: selectPosts(req.session.userId, `p.visibility<>'public'${who ? " AND p.user_id=?" : ""}`, who ? [who] : [], "DESC", SAFETY_SHOWN) });
 });
+// People whose face scan didn't agree with the gender they picked (or couldn't tell), for the creator to decide.
+const genderChecks = () => db.prepare("SELECT id, username, avatar_emoji, avatar_bg, avatar_path, gender_wanted, gender_guess FROM users WHERE gender_wanted IS NOT NULL ORDER BY id").all()
+  .map(u => ({ ...personBrief(u), wanted: u.gender_wanted, guess: u.gender_guess }));
+app.get("/api/safety/genders", requireAuth, requireCreator, (req, res) => res.json({ users: genderChecks() }));
 app.get("/api/safety/suspended", requireAuth, requireCreator, (req, res) => {
   const rows = db.prepare("SELECT id, username, avatar_emoji, avatar_bg, avatar_path, suspended_until, suspend_reason FROM users WHERE suspended_until>? ORDER BY suspended_until").all(Date.now());
   res.json({ users: rows.map(u => ({ ...personBrief(u), suspended: suspensionOf(u) })) });
@@ -2330,7 +2570,7 @@ function profilePayload(viewerId, userId) {
     requestId: f?.id ?? null,
     ...assistantInfo(viewerId, userId),
     suspended: isCreator(db.prepare("SELECT username FROM users WHERE id=?").get(viewerId)?.username) ? suspensionOf(db.prepare("SELECT suspended_until, suspend_reason FROM users WHERE id=?").get(userId)) : null,
-    posts: selectPosts(viewerId, `p.user_id=? AND p.group_key IS NULL AND ${SEES_POST} AND p.adult=? AND p.kid=?`, [userId, viewerId, viewerId, viewerId, ...postZone(viewerId)], "DESC", 30)
+    posts: selectPosts(viewerId, `p.user_id=? AND p.group_key IS NULL AND ${SEES_POST} AND ${SEES_AUDIENCE} AND p.adult=? AND p.kid=?`, [userId, viewerId, viewerId, viewerId, ...audienceParams(viewerId), ...postZone(viewerId)], "DESC", 30)
   };
 }
 // The person in the URL, if the viewer may see them.

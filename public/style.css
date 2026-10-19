@@ -16,7 +16,12 @@
 
 /* Profile pictures */
 .avatar{overflow:hidden}.avatar img{width:100%;height:100%;object-fit:cover;display:block}.avatar.tiny{display:inline-grid;width:26px;height:26px;font-size:.9rem;vertical-align:middle}.avatar.big{width:72px;height:72px;font-size:2.3rem}.avatar.huge{width:124px;height:124px;font-size:4rem;box-shadow:0 8px 24px #ad5d8c22}#accountBtn{display:inline-flex;align-items:center;gap:7px}.account-menu-head{display:flex;align-items:center;gap:10px}
-.avatar-edit{position:relative;padding:0;background:transparent;border-radius:50%;flex-shrink:0}.avatar-edit-badge{position:absolute;right:-3px;bottom:-3px;width:28px;height:28px;display:grid;place-items:center;border-radius:50%;background:var(--surface);border:1px solid var(--line);font-size:.8rem}
+.avatar-edit{position:relative;padding:0;background:transparent;border-radius:50%;flex-shrink:0}
+/* 🔍 A profile picture shown big: 70% of the screen (of its shorter side, so it fits on a phone either way up). */
+.avatar-viewer{overflow:hidden;background:#0b1a1ce6}.avatar-view{display:flex;flex-direction:column;align-items:center;gap:16px}
+.avatar-stage{width:70vmin;height:70vmin;display:grid;place-items:center;touch-action:none;cursor:grab;user-select:none}.avatar-stage:active{cursor:grabbing}
+.avatar.full{width:70vmin;height:70vmin;font-size:34vmin;box-shadow:0 20px 80px #0005;will-change:transform}.avatar.full img{-webkit-user-drag:none;pointer-events:none}
+.zoom-bar{position:relative;z-index:1;display:flex;flex-wrap:wrap;justify-content:center;gap:8px}.zoom-bar #zoomReset{min-width:72px}.zoom-bar .zoom-step{min-width:48px;font-size:1.35rem;font-weight:800;line-height:1}.avatar-edit-badge{position:absolute;right:-3px;bottom:-3px;width:28px;height:28px;display:grid;place-items:center;border-radius:50%;background:var(--surface);border:1px solid var(--line);font-size:.8rem}
 .avatar-modal h3{font-size:1rem;margin:14px 0 8px}.avatar-preview{display:grid;place-items:center;margin:16px 0 4px}.emoji-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px}.emoji-pick{font-size:1.45rem;padding:6px 0;background:var(--surface2);border:2px solid transparent}.emoji-pick.on{border-color:var(--teal);background:var(--teal2)}
 .crop-wrap{position:relative;width:min(260px,100%);aspect-ratio:1;margin:16px auto 12px;border-radius:18px;overflow:hidden;background:var(--surface2)}.crop-wrap canvas{display:block;width:100%;height:100%;touch-action:none}.crop-wrap canvas.draggable{cursor:grab}.crop-wrap canvas.draggable:active{cursor:grabbing}.crop-ring{position:absolute;inset:0;pointer-events:none;background:radial-gradient(circle at center,transparent 69.5%,color-mix(in srgb,var(--surface) 75%,transparent) 70%);box-shadow:inset 0 0 0 1px var(--line);border-radius:18px}.crop-empty{position:absolute;inset:0;display:grid;place-items:center;margin:0;color:var(--muted);font-weight:750;pointer-events:none}
 .file-btn{position:relative;display:flex;justify-content:center;align-items:center;border-radius:14px;padding:10px 14px;font-weight:750;cursor:pointer}.file-btn input{position:absolute;width:1px;height:1px;opacity:0}.file-btn:focus-within{outline:2px solid var(--teal);outline-offset:2px}input[type=range]{padding:0;border:0;background:transparent;accent-color:#e47fb2}input[type=range]:disabled{opacity:.45}
@@ -341,3 +346,27 @@ button.mention:hover,span.mention:hover{text-decoration:underline;transform:none
 .safety-row .person-link{gap:6px}
 #safetyFilter{margin-top:12px}
 .report-reasons .link-btn{margin-left:6px;font-size:.85rem}
+
+/* Other ways to sign in: 📧 Email + Google and 📲 Quick sign in */
+.other-signin{margin-top:16px;padding-top:12px;border-top:1px solid var(--line)}
+.other-signin .muted-note{margin:0}
+.other-signin .actions{margin-top:8px}
+.quick-signin-code{margin:14px 0;padding:14px;border-radius:16px;background:var(--teal2);color:var(--accent-ink);text-align:center;font-family:ui-monospace,Menlo,monospace;font-size:clamp(1.6rem,8vw,2.2rem);font-weight:900;letter-spacing:.14em}
+.quick-confirm{display:flex;gap:8px;max-width:440px}
+.quick-confirm input{flex:1;min-width:0;padding:9px 11px;text-transform:uppercase;font-family:ui-monospace,Menlo,monospace;letter-spacing:.08em}
+.quick-confirm input::placeholder{text-transform:none;font-family:ui-rounded,"Trebuchet MS",system-ui,sans-serif;letter-spacing:0}
+/* 🚻 Boys are blue, girls are pink, and posts for both are purple. These stay light with dark writing in every theme. */
+.gender-pick{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:12px 0}
+.gender-btn{display:flex;flex-direction:column;align-items:center;gap:6px;padding:22px 10px;border-radius:22px;font-size:1.25rem;font-weight:800;border:2px solid transparent}
+.gender-btn span{font-size:3rem;line-height:1}
+.gender-btn.boy,.gender-small.boy{background:linear-gradient(135deg,#d6ebff,#8cc4ff);color:#0d2c4f;border-color:#8cc4ff}
+.gender-btn.girl,.gender-small.girl{background:linear-gradient(135deg,#ffe0ef,#ffa6cf);color:#5a0f33;border-color:#ffa6cf}
+.gender-btn:hover{filter:brightness(1.04);transform:translateY(-1px)}
+.pill.aud{border:1px solid transparent;font-weight:700}button.pill.aud{cursor:pointer}
+.pill.aud.boys{background:#dcecff;color:#123d6b;border-color:#a9cdf5}
+.pill.aud.girls{background:#ffe0ef;color:#6b123d;border-color:#f5a9cd}
+.pill.aud.both{background:#efe3ff;color:#3d1f6b;border-color:#cdb4f5}
+.zone-banner{margin:0 0 14px;padding:10px 14px;border-radius:16px;font-weight:600;border:1px solid transparent}
+.zone-banner.boys{background:#dcecff;color:#123d6b;border-color:#a9cdf5}
+.zone-banner.girls{background:#ffe0ef;color:#6b123d;border-color:#f5a9cd}
+.zone-banner.all{background:#efe3ff;color:#3d1f6b;border-color:#cdb4f5}
