@@ -17,16 +17,22 @@
   <div class="layout">
     <nav class="sidebar" aria-label="Main navigation">
       <button class="nav active" data-page="feed">🏡 Feed</button>
-      <button class="nav" data-page="profile">🌷 Profile</button>
-      <button class="nav" data-page="pictures">🌇 Pictures</button>
-      <button class="nav" data-page="settings">⚙️ Settings</button>
+      <div class="nav-row"><button class="nav" data-page="profile">🌷 Profile</button><button class="nav-arrow" data-nav-group="profile" aria-controls="navProfile" aria-expanded="false" aria-label="More" title="More"></button></div>
+      <div class="nav-group" id="navProfile" hidden>
+        <button class="nav" data-page="pictures">🌇 Pictures</button>
+        <button class="nav" data-page="settings">⚙️ Settings</button>
+        <div class="nav-row"><button class="nav" data-page="friends">👯 Friends</button><button class="nav-arrow" data-nav-group="friends" aria-controls="navFriends" aria-expanded="false" aria-label="More" title="More"></button></div>
+        <div class="nav-group" id="navFriends" hidden>
+          <button class="nav" data-page="groups">🏘️ Groups</button>
+          <button class="nav" data-page="nails">💅 Nails</button>
+        </div>
+      </div>
       <button class="nav" data-page="rules">📜 Rules</button>
-      <button class="nav" data-page="friends">👯 Friends</button>
-      <button class="nav" data-page="groups">🏘️ Groups</button>
-      <button class="nav" data-page="nails">💅 Nails</button>
       <button class="nav" data-page="learn">📚 Learn!</button>
-      <button class="nav" data-page="shop">🛍️ Shop</button>
-      <button class="nav" data-page="codes">👩‍💻 Codes</button>
+      <div class="nav-row"><button class="nav" data-page="shop">🛍️ Shop</button><button class="nav-arrow" data-nav-group="shop" aria-controls="navShop" aria-expanded="false" aria-label="More" title="More"></button></div>
+      <div class="nav-group" id="navShop" hidden>
+        <button class="nav" data-page="codes">👩‍💻 Codes</button>
+      </div>
       <button class="nav" data-page="reports" hidden>🚩 Reports</button>
       <button class="nav" data-page="safety" hidden>🛡️ Safety</button>
       <button class="nav" data-page="about">🎀 About The Creator</button>
@@ -34,8 +40,10 @@
     </nav>
     <main id="main" aria-live="polite"></main>
   </div>
+  <button class="help-btn" id="helpBtn">🙋 Need Help?</button>
   <div id="modalroot"></div>
-  <footer>Yakimma • The world you can show off • Early access starter</footer>
+  <footer>Yakimma • The world you can show off • Early access starter • <button class="link-btn" id="footerLang" data-open-language translate="no">🌐 English</button></footer>
+  <script src="/i18n.js" defer></script>
   <script src="/app.js" defer></script>
 </body>
 </html>

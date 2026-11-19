@@ -17,6 +17,18 @@ services:
         value: /var/data/db
       - key: UPLOAD_DIR
         value: /var/data/uploads
+      # Deletes every account, post, group, chat and upload once, the first time the live site starts with this value
+      # (see "fresh start" in server.js). Change it (like launch-2) only to start fresh again.
+      - key: FRESH_START
+        value: launch-1
+      # The admins' passwords for their accounts on the fresh Yakimma (see server.js). Render asks for them, so they're
+      # never in the code.
+      - key: MAHFUJZKAKA_PASSWORD
+        sync: false
+      - key: CREATOR_PASSWORD
+        sync: false
+      - key: BLEH_PASSWORD
+        sync: false
     disk:
       name: yakimma-data
       mountPath: /var/data

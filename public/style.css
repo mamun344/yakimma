@@ -37,13 +37,40 @@
 [data-theme="pastel"]{--pink:#ffa8d2;--pink2:#ffe1f0;--teal:#9fd8ff;--teal2:#dcf8e8;--ink:#3c3350;--muted:#6f6385;--surface:#fffdff;--surface2:#fdf3ff;--line:#ecd3ff;--root:linear-gradient(135deg,#ffe3f1,#fff3d6 25%,#defbe8 50%,#ddefff 75%,#efe2ff);--on-accent:#3c3350;--accent-ink:#2a7258;--nav-ink:#a3407f;--hero-ink:#45365a;--accent-bg:linear-gradient(120deg,#ffb3d6,#ffd8a8,#bff3cf,#b3dcff,#d9c2ff);--hero-bg:linear-gradient(115deg,#ffd0e6,#ffeab8,#c9f7d8,#c8e6ff,#e4d2ff);--name-bg:linear-gradient(90deg,#e0479a,#f08a2c,#2fae6f,#3a8ee6,#9a5ae6)}
 [data-theme="pastel"] body{background-attachment:fixed}
 [data-theme="pastel"] .topbar{background:linear-gradient(90deg,#ffe3f1,#fff3d6,#defbe8,#ddefff,#efe2ff)}
-[data-theme="pastel"] :is(.panel,.product,.group-card,.nav):nth-child(6n+1){background:#ffeaf4}
-[data-theme="pastel"] :is(.panel,.product,.group-card,.nav):nth-child(6n+2){background:#fff1de}
-[data-theme="pastel"] :is(.panel,.product,.group-card,.nav):nth-child(6n+3){background:#fffadb}
-[data-theme="pastel"] :is(.panel,.product,.group-card,.nav):nth-child(6n+4){background:#e6fbee}
-[data-theme="pastel"] :is(.panel,.product,.group-card,.nav):nth-child(6n+5){background:#e5f3ff}
-[data-theme="pastel"] :is(.panel,.product,.group-card,.nav):nth-child(6n+6){background:#f1e8ff}
+[data-theme="pastel"] :is(.panel,.product,.group-card,.nav,.nav-row):nth-child(6n+1){background:#ffeaf4}
+[data-theme="pastel"] :is(.panel,.product,.group-card,.nav,.nav-row):nth-child(6n+2){background:#fff1de}
+[data-theme="pastel"] :is(.panel,.product,.group-card,.nav,.nav-row):nth-child(6n+3){background:#fffadb}
+[data-theme="pastel"] :is(.panel,.product,.group-card,.nav,.nav-row):nth-child(6n+4){background:#e6fbee}
+[data-theme="pastel"] :is(.panel,.product,.group-card,.nav,.nav-row):nth-child(6n+5){background:#e5f3ff}
+[data-theme="pastel"] :is(.panel,.product,.group-card,.nav,.nav-row):nth-child(6n+6){background:#f1e8ff}
 [data-theme="pastel"] .nav.active{background:#fff;color:var(--nav-ink);box-shadow:inset 0 0 0 2px var(--pink)}
+/* The menu's ▸ arrows (Profile's, Friends' and Shop's) and the pages they open, tucked in under them. On phones the menu is a
+   row, so the tucked-in pages carry on along it. In Pastel the whole row (page and arrow) is one colour. */
+.nav-row{display:flex;gap:4px;border-radius:14px}
+.nav-row>.nav{flex:1}
+.nav-arrow{background:transparent;color:var(--muted);padding:0 10px;font-size:1.5rem;line-height:1;white-space:nowrap}
+.nav-arrow::before{content:"▸"}.nav-arrow[aria-expanded="true"]::before{content:"▾"}
+.nav-arrow:hover{color:var(--nav-ink)}
+.nav-group{display:flex;flex-direction:column;gap:8px;margin-left:12px;padding-left:10px;border-left:2px solid var(--line)}
+[data-theme="pastel"] .nav-row>.nav:not(.active){background:transparent}
+@media(max-width:700px){.nav-group{flex-direction:row;margin-left:0;padding-left:8px}}
+/* 🙋 Need Help? in the bottom-right corner of every page, glowing so it's easy to find. It sits under pop-ups, and
+   pictures from 📷 leave it out (they only take what's in <main>). */
+.help-btn{position:fixed;right:18px;bottom:18px;z-index:9;border-radius:99px;padding:12px 18px;font-size:1rem;background:var(--accent-bg);color:var(--on-accent);box-shadow:0 0 0 3px var(--surface),var(--shadow);animation:helpglow 2.4s ease-in-out infinite}
+@keyframes helpglow{50%{box-shadow:0 0 0 3px var(--surface),0 0 0 9px color-mix(in srgb,var(--pink) 45%,transparent),var(--shadow)}}
+@media(prefers-reduced-motion:reduce){.help-btn{animation:none}}
+@media(max-width:700px){.help-btn{right:12px;bottom:12px;padding:10px 14px;font-size:.92rem}}
+.ai-questions{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}
+/* ⭐ Rating Yakimma, next to the Settings title: stars you haven't picked are grey. */
+.rate-stars{display:inline-flex;gap:2px;margin-left:12px;vertical-align:middle}
+.rate-star{background:none;padding:2px;font-size:1.4rem;line-height:1}
+.rate-star:not(.on){filter:grayscale(1);opacity:.35}
+.rate-star:hover{transform:scale(1.15)}
+.rating-average{font-size:1.1rem}
+/* 😊 Quick reactions in Settings */
+.quick-pick{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}
+.quick-pick .emoji-btn{font-size:1.6rem;padding:8px 10px;background:var(--surface2);border:1px solid var(--line);border-radius:14px}
+.ai-questions button{text-align:left;font-weight:700}
 [data-theme="pastel"] :is(.productart,.group-icon){background:var(--hero-bg)}
 
 [hidden]{display:none!important}
@@ -202,7 +229,10 @@ a.link-button{display:inline-block;border-radius:14px;padding:10px 14px;font-wei
 
 /* Advertisement */
 /* At most 3 cards in a row, so a 4th one starts a new row under the first instead of squeezing the others. */
-.ads{display:grid;grid-template-columns:repeat(auto-fit,minmax(max(220px,calc((100% - 24px)/3)),1fr));gap:12px}
+.ads{display:grid;grid-template-columns:repeat(auto-fit,minmax(max(220px,calc((100% - 24px)/3)),1fr));gap:12px;container-type:inline-size}
+/* The ad marked `below` (Join The Galaxy Cuties) sits right under Follow Me On YouTube, the 2nd ad. With two or three ads
+   in a row (452px or wider) that's the 2nd column of the 2nd row; with one, it's already next in line. */
+@container (min-width:452px){.ad-below{grid-column:2;grid-row:2}}
 .ad{margin:0;display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center}
 .ad h2{margin:0;font-size:1.15rem}
 .ad p{margin:0;overflow-wrap:anywhere}
@@ -370,3 +400,237 @@ button.mention:hover,span.mention:hover{text-decoration:underline;transform:none
 .zone-banner.boys{background:#dcecff;color:#123d6b;border-color:#a9cdf5}
 .zone-banner.girls{background:#ffe0ef;color:#6b123d;border-color:#f5a9cd}
 .zone-banner.all{background:#efe3ff;color:#3d1f6b;border-color:#cdb4f5}
+
+/* The 🔎 Search Bar out on the right of the creator's name on the Feed, which stays in the middle with the email under it
+   like before. When there isn't room beside the name, the Search Bar goes under the email. */
+.home-top{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;column-gap:16px;margin-bottom:16px}
+.home-top .home-name{grid-area:1/2;margin:2px auto 6px}
+.home-top .home-email{grid-area:2/1/3/4;margin:0}
+.home-top .search-bar{grid-area:1/3;justify-self:end}
+@media(max-width:1080px){.home-top .search-bar{grid-area:3/1/4/4;justify-self:center;margin-top:12px}}
+.search-bar{display:flex;align-items:center;gap:8px;width:170px;padding:10px 16px;border-radius:99px;background:var(--surface);border:1px solid var(--line);color:var(--ink);text-align:left;cursor:text;box-shadow:var(--shadow)}
+.search-bar:hover{transform:none;border-color:var(--teal)}
+.search-bar-hint{color:var(--muted);opacity:.65;font-weight:600}
+.search-bar[aria-pressed="true"]{border-color:var(--teal);background:var(--teal2)}
+@media(max-width:700px){.search-bar{width:min(100%,320px)}}
+.search-kinds{margin-top:10px}
+
+/* 🔗 Links on a profile, and the list of your own in Settings */
+.profile-links{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.profile-link{display:inline-block;max-width:100%;padding:5px 10px;border-radius:99px;background:var(--teal2);color:var(--accent-ink);font-size:.85rem;font-weight:800;text-decoration:none;overflow-wrap:anywhere}
+.profile-link:hover{text-decoration:underline}
+.link-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0;border-top:1px solid var(--line)}
+.link-row:last-of-type{margin-bottom:12px}
+
+/* ℹ️ Group info, and group photos (shown instead of the icon) */
+.group-icon.photo{overflow:hidden;padding:0}
+.group-icon.photo img{width:100%;height:100%;object-fit:cover}
+.group-icon.big{width:96px;height:96px;border-radius:50%;font-size:2.8rem}
+.title-photo{width:1.3em;height:1.3em;border-radius:50%;object-fit:cover;vertical-align:-.2em}
+.group-info .gi-top{display:grid;justify-items:center;text-align:center;gap:4px;margin-bottom:10px}
+.group-info .gi-top h3{margin:6px 0 0}
+.group-info .gi-top p{margin:0}
+.gi-desc{white-space:pre-wrap;overflow-wrap:anywhere}
+.gi-photo{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.gi-photo-tools{display:grid;gap:8px}
+.gi-settings{display:grid;gap:2px;margin-bottom:6px}
+.gi-members-head{margin-top:14px}
+.gi-members-head h3{margin:0}
+.member-tools{display:flex;gap:6px;margin-left:auto;flex-wrap:wrap}
+.member-tools button{padding:6px 10px;font-size:.82rem}
+
+/* 💬 Group chats like WhatsApp: Yakimma's notes, replies, polls, events and pins */
+.badge.muted{background:var(--muted)}
+.msg-note{align-self:center;max-width:90%;text-align:center}
+.msg-note span{display:inline-block;padding:4px 10px;border-radius:10px;background:var(--surface);border:1px solid var(--line);color:var(--muted);font-size:.78rem;line-height:1.4}
+.quote{display:block;margin:2px 0 6px;padding:4px 8px;border-left:3px solid var(--teal);border-radius:6px;background:var(--surface2);font-size:.82rem;color:var(--muted);overflow-wrap:anywhere;cursor:pointer}
+.quote strong{display:block;color:var(--accent-ink)}
+.card-bubble{display:grid;gap:6px;width:min(300px,100%)}
+.card-foot{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.card-foot .link-btn{font-size:1.1rem;padding:0 6px}
+.poll,.event{display:grid;gap:6px}
+.poll-opt{position:relative;display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--line);border-radius:12px;background:var(--surface);color:var(--ink);text-align:left;overflow:hidden;font-weight:600}
+.poll-opt.on{border-color:var(--teal)}
+.poll-opt>span:not(.poll-bar){position:relative;z-index:1}
+.poll-check{display:grid;place-items:center;width:20px;height:20px;border-radius:50%;border:2px solid var(--teal);font-size:.75rem;flex-shrink:0}
+.poll-opt.on .poll-check{background:var(--teal);color:var(--on-accent)}
+.poll-text{flex:1;overflow-wrap:anywhere}
+.poll-bar{position:absolute;left:0;top:0;bottom:0;background:var(--teal2);transition:width .3s}
+.event .row button{padding:7px 10px;font-size:.85rem}
+.event .row button.on{background:var(--teal2);border-color:var(--teal)}
+.event-desc{white-space:pre-wrap;overflow-wrap:anywhere}
+.pinned-bar{display:flex;align-items:center;gap:8px;width:100%;margin-bottom:8px;padding:8px 12px;border:1px solid var(--line);border-radius:12px;background:var(--surface2);color:var(--ink);text-align:left;font-weight:600}
+.pinned-bar span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pinned-bar small{color:var(--muted)}
+.flash .bubble,.msg-note.flash span{animation:flash 1.6s}
+@keyframes flash{0%,60%{box-shadow:0 0 0 3px var(--teal)}100%{box-shadow:none}}
+@media(prefers-reduced-motion:reduce){.flash .bubble,.msg-note.flash span{animation:none;box-shadow:0 0 0 3px var(--teal)}}
+.pin-for{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:.85rem}
+.attach-menu{display:flex;gap:8px;margin-top:8px}
+.disappear-note{margin:8px 0 0}
+.poll-inputs{display:grid;gap:6px;margin-bottom:8px}
+
+/* ℹ️ Group info's rows, permissions, media, wallpapers and invite */
+.gi-section{display:grid;gap:2px;margin:10px 0;padding:4px;border:1px solid var(--line);border-radius:14px}
+.gi-row{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;padding:10px 12px;border-radius:10px;background:transparent;color:var(--ink);text-align:left;font-weight:700;flex-wrap:wrap}
+button.gi-row:hover{background:var(--surface2)}
+.gi-row small{margin-left:auto;color:var(--muted);font-weight:600}
+.gi-select{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0;padding:6px 12px}
+.gi-select select{width:auto;max-width:55%;padding:8px 10px}
+.gi-media{display:grid;grid-template-columns:repeat(auto-fill,minmax(84px,1fr));gap:6px;margin-bottom:12px}
+.gi-thumb{position:relative;aspect-ratio:1;padding:0;overflow:hidden;border-radius:10px;background:var(--surface2)}
+.gi-thumb img,.gi-thumb video{width:100%;height:100%;object-fit:cover}
+.gi-play{position:absolute;inset:0;display:grid;place-items:center;color:#fff;font-size:1.4rem;text-shadow:0 1px 4px #0008}
+.gi-link{display:grid;gap:4px}
+.gi-star{width:100%;background:var(--surface);color:var(--ink);font-weight:400;text-align:left}
+.gi-walls{display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:8px}
+.gi-wall{display:grid;justify-items:center;gap:6px;padding:8px;border:2px solid transparent;background:var(--surface2);color:var(--ink);font-size:.82rem}
+.gi-wall.on{border-color:var(--teal)}
+.gi-wall span{width:100%;aspect-ratio:3/4;border:1px solid var(--line);border-radius:10px}
+.gi-exit{margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+.bubble .card-title{display:block;font-size:1rem;font-weight:800;color:var(--ink);overflow-wrap:anywhere}
+
+/* 🖼️ Photos and videos in chats, seeing one bigger, and choosing some to send */
+.chat-media{display:block;width:100%;max-height:320px;object-fit:cover;border-radius:12px;background:var(--surface2)}
+video.chat-media{object-fit:contain;background:#000}
+.chat-media-btn{display:block;width:100%;padding:0;border-radius:12px;background:transparent;overflow:hidden}
+.media-viewer{background:#000d}
+.media-view{display:grid;justify-items:center;gap:10px;max-width:min(96vw,1100px)}
+.media-view img{max-width:100%;max-height:80vh;border-radius:12px;object-fit:contain}
+.button-link{display:inline-flex;align-items:center;border-radius:14px;padding:10px 14px;font-weight:750;text-decoration:none}
+.send-media{margin-bottom:6px}
+.send-media .gi-thumb{cursor:default}
+.contact-info-btn{margin-left:auto}
+.contact-info .member .group-icon{width:40px;height:40px;font-size:1.3rem}
+/* A set shape for chat photos and videos, so the chat stays scrolled to the newest message while they load. */
+img.chat-media{aspect-ratio:4/3}
+video.chat-media{aspect-ratio:16/9}
+
+/* 🛠️ Admin, next to an admin's name */
+.admin-tag{display:inline-block;margin-left:4px;padding:1px 7px;border-radius:99px;background:var(--teal2);color:var(--accent-ink);font-size:.7rem;font-weight:800;vertical-align:middle;white-space:nowrap}
+
+/* 🌐 Choosing a language, and Welcome! in it */
+.lang-modal{width:min(560px,100%)}
+.lang-modal h2{font-size:1.05rem;line-height:1.4}
+.lang-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin-top:6px}
+.lang-pick{padding:14px 12px;border:1px solid var(--line);border-radius:14px;background:var(--surface2);color:var(--ink);font-size:1.05rem;font-weight:800}
+.lang-pick.on{border-color:var(--teal);background:var(--teal2)}
+.lang-welcome{display:grid;justify-items:center;gap:6px;text-align:center;padding:34px 22px;animation:pop .35s ease-out}
+.lang-welcome h2{margin:0;font-size:clamp(1.8rem,7vw,2.6rem)}
+.lang-hello{font-size:3rem}
+@media(prefers-reduced-motion:reduce){.lang-welcome{animation:none}}
+footer .link-btn{font-size:inherit}
+
+/* Arabic and Urdu: each line of words reads right to left in its own right, but the page keeps the same layout and
+   alignment as every other language (nothing swaps sides). See "rtl-words" in public/i18n.js. */
+html.rtl-words:not([dir=rtl]) { text-align: left; }
+html.rtl-words body * { unicode-bidi: plaintext; }
+
+/* 🤪 CRAZZZYYY MODE: in Arabic, the whole page turns around (dir="rtl", set in applyTheme in public/app.js). Every
+   line of words lines up on the right, but still reads the right way. */
+html[dir=rtl] { text-align: right; }
+html[dir=rtl] body * { unicode-bidi: plaintext; }
+html[dir=rtl] :is(.nav, .theme-card, .grade-list button, .notif, .post-author, .person-link, .picture, .fwd-target, .gi-star, button.bubble) { text-align: right; }
+.mode-btns { margin-top: 0; }
+.crazy-btn.on { background: linear-gradient(90deg, #ff5f6d, #ffc371, #7cf29c, #6ec6ff, #c58bff); color: #24103a; border-color: transparent; }
+
+/* 📞 Calls, like WhatsApp's call screen (see "Calls" in public/app.js). With one friend, their video fills the screen
+   ("one"); with more people, everyone's in a grid ("many", n2 to n7 tiles). Your own video is the little picture
+   ("pip"), which you can drag to any corner and tap to swap; with no video, the friend's picture is in the middle. */
+.call-screen{position:fixed;inset:0;z-index:50;background:radial-gradient(circle at 50% 30%,#1f3a45,#0b141a 70%);color:#e9edef;overflow:hidden}
+.call-screen video{display:none;background:#000}
+#callGrid{position:absolute;inset:0;display:grid;gap:4px;padding:4px}
+#callGrid.n1{display:block;padding:0}
+#callGrid.n2{grid-template-rows:1fr 1fr}
+#callGrid.n3,#callGrid.n4{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
+#callGrid.n5,#callGrid.n6{grid-template-columns:1fr 1fr;grid-template-rows:repeat(3,1fr)}
+#callGrid.n7{grid-template-columns:1fr 1fr;grid-template-rows:repeat(4,1fr)}
+@media(min-width:700px){#callGrid.n2{grid-template-rows:none;grid-template-columns:1fr 1fr}#callGrid.n5,#callGrid.n6{grid-template-columns:repeat(3,1fr);grid-template-rows:1fr 1fr}#callGrid.n7{grid-template-columns:repeat(4,1fr);grid-template-rows:1fr 1fr}}
+.call-tile{position:relative;overflow:hidden;border-radius:14px;background:#1f2c34;min-height:0}
+#callGrid.n1 .call-tile{position:absolute;inset:0;border-radius:0;background:transparent}
+#callGrid.n1 .call-tile.cam{background:#000}
+.call-tile video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.call-tile.cam video{display:block}
+.call-tile.screen video{object-fit:contain}
+.tile-info{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;padding:8px;text-align:center;text-shadow:0 1px 4px #000a}
+.tile-info .avatar.big{width:72px;height:72px;font-size:2.3rem}
+.tile-info small{color:#c9d3d8;font-weight:700}
+.call-tile.cam .tile-info{inset:auto 0 0 0;align-items:flex-start;padding:6px 10px;background:linear-gradient(transparent,#0008)}
+#callGrid.n1 .tile-info{display:none}
+.call-screen #callSelf{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:0}
+.call-screen.front #callSelf{transform:scaleX(-1)}
+.call-screen.sv #callSelf{display:block}
+/* The little picture (class "pip"): your video, or your friend's after a swap, in the corner it was last dragged to. */
+#callScreen .pip{position:absolute;inset:auto;width:min(28vw,130px);height:auto;aspect-ratio:3/4;border-radius:14px;z-index:2;box-shadow:0 6px 20px #0008;cursor:grab;touch-action:none;user-select:none;background:#000}
+#callScreen.pip-br .pip{right:16px;bottom:128px}#callScreen.pip-bl .pip{left:16px;bottom:128px}
+#callScreen.pip-tr .pip{right:16px;top:64px}#callScreen.pip-tl .pip{left:16px;top:64px}
+#callScreen .pip.dragging,.call-float.dragging{cursor:grabbing;box-shadow:0 12px 30px #000a}
+#callScreen .pip.settling,.call-float.settling{transition:translate .25s ease}
+#callFx{position:absolute;inset:0;z-index:4;pointer-events:none;overflow:hidden}
+.call-react{position:absolute;bottom:120px;display:flex;flex-direction:column;align-items:center;animation:callReact 2.6s ease-out forwards}
+.call-react span{font-size:2.6rem}.call-react small{font-size:.72rem;font-weight:800;background:#0008;border-radius:99px;padding:1px 7px}
+@keyframes callReact{0%{transform:translateY(0) scale(.6);opacity:0}12%{opacity:1;transform:translateY(-30px) scale(1.1)}100%{transform:translateY(-55vh) scale(1);opacity:0}}
+.call-ui{position:relative;z-index:3;height:100%;display:flex;flex-direction:column;justify-content:space-between;padding:14px 16px 26px;pointer-events:none}
+.call-ui button,.call-ui .call-replies,.call-ui .call-sheet{pointer-events:auto}
+.call-top{display:grid;grid-template-columns:96px 1fr 96px;align-items:center;gap:8px}
+.call-top-right{display:flex;gap:6px;justify-content:flex-end}.call-min.on{background:#e9edef;color:#0b141a}
+.call-min{background:#ffffff1f;color:#e9edef;width:40px;height:40px;padding:0;border-radius:50%;font-size:1.05rem;white-space:nowrap}
+.call-lock{text-align:center;color:#c9d3d8;font-size:.78rem}
+.call-who{text-align:center;text-shadow:0 1px 6px #0009;margin:auto 0}
+.call-who h2{margin:14px 0 6px;font-size:1.7rem}
+.call-who p{margin:0;color:#c9d3d8;font-weight:700}
+.rv .call-who,.sbig .call-who,.many .call-who{margin:6px 0 auto}.rv .call-who h2,.sbig .call-who h2,.many .call-who h2{font-size:1.2rem;margin-top:0}
+.many .call-who{background:#0b141acc;border-radius:16px;padding:6px 12px;align-self:center}
+.call-face .avatar.big{width:132px;height:132px;font-size:4rem;margin:auto;box-shadow:0 0 0 10px #ffffff12,0 0 0 22px #ffffff08}
+.call-chip{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:center;margin:10px auto 0!important;padding:5px 11px;border-radius:99px;background:#000a;pointer-events:auto}
+.call-chip .soft{padding:4px 10px;font-size:.8rem;background:#ffffff26;color:#e9edef;border-color:#ffffff33}
+.call-error{background:#f15c6dcc;color:#fff}
+.call-waiting{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:center;margin:8px auto 0;padding:8px 12px;border-radius:16px;background:#25d366;color:#0b141a;font-weight:800;pointer-events:auto;box-shadow:0 6px 20px #0006}
+.call-controls{display:flex;justify-content:center;gap:12px;flex-wrap:wrap;padding:12px 16px;margin:0 auto;border-radius:30px;background:#1f2c34e6}
+.call-controls:empty{display:none}
+.call-btn-round{display:flex;flex-direction:column;align-items:center;gap:6px;background:none;color:#e9edef;padding:0;min-width:58px}
+.call-btn-round>span{display:grid;place-items:center;width:52px;height:52px;border-radius:50%;background:#ffffff26;font-size:1.4rem}
+.call-btn-round small{color:#c9d3d8;font-size:.72rem;font-weight:700}
+.call-btn-round.on>span{background:#e9edef}
+.call-btn-round.red>span{background:#f15c6d}
+.call-btn-round.green>span{background:#25d366}
+.call-btn-round.end>span{transform:rotate(135deg)}
+.call-sheet{display:flex;flex-direction:column;gap:8px;width:min(380px,100%);margin:0 auto 10px;padding:12px;border-radius:20px;background:#1f2c34f2;max-height:45vh;overflow:auto}
+.call-sheet .soft{background:#ffffff1f;color:#e9edef;border-color:#ffffff26;text-align:start}
+.call-sheet h3{margin:0}.call-sheet .muted-note{color:#c9d3d8;margin:0}
+.call-reacts{flex-direction:row;justify-content:center;flex-wrap:wrap;width:auto}
+.call-reacts button{background:none;font-size:1.8rem;padding:4px 6px}
+.call-add-row{display:flex;align-items:center;gap:10px}.call-add-row strong{flex:1}
+/* ✨ Effects: a row of round picks you can scroll sideways, like WhatsApp's. */
+.call-effects{width:min(520px,100%)}
+.fx-row{display:flex;gap:10px;overflow-x:auto;padding:4px 2px 8px;scrollbar-width:thin}
+.fx-pick{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:4px;width:66px;padding:0;background:none;color:#e9edef}
+.fx-pick span{display:grid;place-items:center;width:54px;height:54px;border-radius:50%;background:#ffffff1f;font-size:1.6rem;border:2px solid transparent}
+.fx-pick.on span{border-color:#25d366;background:#25d36633}
+.fx-pick small{font-size:.7rem;font-weight:700;color:#c9d3d8;text-align:center;line-height:1.15}
+.fx-toggles .soft.on{background:#25d366;color:#0b141a;border-color:#25d366}
+#callFxSrc{position:fixed;left:0;top:0;width:1px;height:1px;overflow:hidden;opacity:0;pointer-events:none}
+#callFxSrc video{width:1px;height:1px}
+.call-replies{display:flex;flex-direction:column;gap:8px;width:min(360px,100%)}
+.call-replies .soft{background:#ffffff1f;color:#e9edef;border-color:#ffffff26;text-align:start}
+.call-bar{position:fixed;top:0;left:0;right:0;z-index:49;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:9px 16px;border-radius:0;background:#25d366;color:#0b141a;font-weight:800;box-shadow:0 4px 14px #0003}
+.call-float{position:fixed;z-index:49;width:min(32vw,150px);aspect-ratio:3/4;border-radius:16px;overflow:hidden;background:#000;box-shadow:0 8px 26px #0008;cursor:grab;touch-action:none;user-select:none}
+.call-float video{display:block;width:100%;height:100%;object-fit:cover}
+.call-float>span{position:absolute;left:8px;bottom:6px;color:#fff;font-weight:800;font-size:.8rem;text-shadow:0 1px 3px #000}
+.call-float.at-br{right:16px;bottom:16px}.call-float.at-bl{left:16px;bottom:16px}.call-float.at-tr{right:16px;top:84px}.call-float.at-tl{left:16px;top:84px}
+.chat-tools{display:inline-flex;gap:6px;margin-left:auto;flex-wrap:nowrap}
+.chat-tools .contact-info-btn{margin-left:0}
+.call-btn{padding:8px 12px;font-size:1.05rem}
+.call-note{padding:0}
+.call-note-btn{background:var(--surface2);color:var(--ink);border:1px solid var(--line);border-radius:99px;padding:6px 12px;font-weight:700;font-size:.85rem}
+.msg-note .call-note-btn span{display:inline;padding:0;border:0;border-radius:0;background:none;color:inherit;font-size:inherit}.msg-note .call-note-btn span.missed{color:#e0394f}
+.missed{color:#e0394f;font-weight:800}
+.ci-calls{justify-content:center}
+.call-row-main{display:flex;align-items:center;gap:10px;flex:1;min-width:0;background:none;color:inherit;padding:0;text-align:start;font-weight:inherit}
+.call-row-main>span{display:flex;flex-direction:column;min-width:0}.call-row-main small span{white-space:nowrap}
+.new-call{border:1px dashed var(--line);border-radius:16px;padding:6px 10px;margin:8px 0 12px}
+.group-call-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px;padding:10px 14px;border-radius:16px;background:#25d36622;border:1px solid #25d36666;font-weight:800}
+.group-call-bar>span:first-child{flex:1}.group-call-faces{display:inline-flex;gap:2px}
+.call-info-list{display:flex;flex-direction:column;gap:6px;margin-top:12px}
+.call-info-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--line);border-radius:12px}.call-info-row small{flex:1;color:var(--muted)}
+@media(prefers-reduced-motion:reduce){.call-face .avatar.big{box-shadow:none}#callScreen .pip.settling,.call-float.settling{transition:none}.call-react{animation-duration:1.2s}}
